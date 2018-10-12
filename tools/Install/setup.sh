@@ -202,7 +202,7 @@ then
     echo
 
     cd $SOURCE_PATH
-    git clone --single-branch git://github.com/alexa/avs-device-sdk.git
+    git clone --single-branch git://github.com/shivasiddharth/avs-device-sdk.git
   fi
 
   # make the SDK
