@@ -38,28 +38,7 @@ install_dependencies() {
 run_os_specifics() {
   build_port_audio
   build_kwd_engine
-  configure_sound
-}
-
-configure_sound() {
-  echo
-  echo "==============> SAVING AUDIO CONFIGURATION FILE =============="
-  echo
-
-  cat << EOF > "$SOUND_CONFIG"
-  pcm.!default {
-    type asym
-     playback.pcm {
-       type plug
-       slave.pcm "hw:0,0"
-     }
-     capture.pcm {
-       type plug
-       slave.pcm "hw:1,0"
-     }
   }
-EOF
-}
 
 build_kwd_engine() {
   #get sensory and build

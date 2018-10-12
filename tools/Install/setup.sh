@@ -51,6 +51,14 @@ LIB_SUFFIX="a"
 
 GSTREAMER_AUDIO_SINK="autoaudiosink"
 
+DEVICE_SERIAL_NUMBER="123456"
+
+echo ""
+read -r -p "Enter the client id: " CLIENT_ID
+echo ""
+read -r -p "Enter the product id: " PRODUCT_ID
+echo ""
+
 build_port_audio() {
   # build port audio
   echo
@@ -84,18 +92,6 @@ get_platform() {
   fi
 }
 
-if [ $# -eq 0 ]
-then
-  echo  'bash setup.sh <config-file>'
-  echo  'the config file must contain the following:'
-  echo  '   CLIENT_ID=<OAuth client ID>'
-  echo  '   PRODUCT_ID=<your product name for device>'
-  echo  '   DEVICE_SERIAL_NUMBER=<your device serial number>'
-
-  exit 1
-fi
-
-source $1
 
 # The target platform for the build.
 PLATFORM=${PLATFORM:-$(get_platform)}
@@ -312,4 +308,3 @@ chmod +x "$START_SCRIPT"
 EOF
 
 echo " **** Completed Configuration/Build ***"
-
