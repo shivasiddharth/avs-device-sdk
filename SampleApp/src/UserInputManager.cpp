@@ -122,6 +122,8 @@ SampleAppReturnCode UserInputManager::run() {
     bool userTriggeredLogout = false;
     m_interactionManager->begin();
     while (true) {
+        std::this_thread::sleep_for(std::chrono::hours(1));
+        continue;
         char x;
         if (!readConsoleInput(&x)) {
             break;
