@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * Copyright 2017-2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License").
  * You may not use this file except in compliance with the License.
@@ -15,6 +15,11 @@
 
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
+#include <gmock/gmock-actions.h>
+
+#include <AVSCommon/Utils/Timing/TimeUtils.h>
+#include <RegistrationManager/CustomerDataManager.h>
+#include <Settings/DeviceSettingsManager.h>
 
 #include "Alerts/AlertScheduler.h"
 
@@ -23,10 +28,13 @@ namespace capabilityAgents {
 namespace alerts {
 namespace test {
 
+using namespace testing;
+
 /// Tokens for alerts.
 static const std::string ALERT1_TOKEN = "token1";
 static const std::string ALERT2_TOKEN = "token2";
 static const std::string ALERT3_TOKEN = "token3";
+static const std::string ALERT4_TOKEN = "token4";
 
 /// Test alert type
 static const std::string ALERT_TYPE = "TEST_ALERT_TYPE";
@@ -35,7 +43,7 @@ static const std::string ALERT_TYPE = "TEST_ALERT_TYPE";
 static const std::string PAST_INSTANT = "2000-01-01T12:34:56+0000";
 
 /// A schedule instant in the future for alerts.
-static const std::string FUTURE_INSTANT = "2030-01-01T12:34:56+0000";
+static const std::string FUTURE_INSTANT_SUFFIX = "-01-01T12:34:56+0000";
 
 /// Amount of time that the alert observer should wait for a task to finish.
 static const std::chrono::milliseconds TEST_TIMEOUT{100};
@@ -45,30 +53,30 @@ static const std::chrono::seconds ALERT_PAST_DUE_TIME_LIMIT{10};
 
 class MockRenderer : public renderer::RendererInterface {
 public:
-    MOCK_METHOD1(
-        setObserver,
-        void(std::shared_ptr<capabilityAgents::alerts::renderer::RendererObserverInterface> observer));
-    MOCK_METHOD4(
+    MOCK_METHOD7(
         start,
         void(
+            std::shared_ptr<capabilityAgents::alerts::renderer::RendererObserverInterface> observer,
             std::function<std::unique_ptr<std::istream>()> audioFactory,
+            bool alarmVolumeRampEnabled,
             const std::vector<std::string>& urls,
             int loopCount,
-            std::chrono::milliseconds loopPause));
+            std::chrono::milliseconds loopPause,
+            bool startWithPause));
     MOCK_METHOD0(stop, void());
 };
 
 class TestAlert : public Alert {
 public:
     TestAlert() :
-            Alert(defaultAudioFactory, shortAudioFactory),
+            Alert(defaultAudioFactory, shortAudioFactory, nullptr),
             m_alertType{ALERT_TYPE},
             m_renderer{std::make_shared<MockRenderer>()} {
         this->setRenderer(m_renderer);
     }
 
     TestAlert(const std::string& token, const std::string& schedTime) :
-            Alert(defaultAudioFactory, shortAudioFactory),
+            Alert(defaultAudioFactory, shortAudioFactory, nullptr),
             m_alertType{ALERT_TYPE},
             m_renderer{std::make_shared<MockRenderer>()} {
         this->setRenderer(m_renderer);
@@ -135,7 +143,9 @@ public:
     bool store(std::shared_ptr<Alert> alert) {
         return m_storeRetVal;
     }
-    bool load(std::vector<std::shared_ptr<Alert>>* alertContainer) {
+    bool load(
+        std::vector<std::shared_ptr<Alert>>* alertContainer,
+        std::shared_ptr<settings::DeviceSettingsManager> settingsManager) {
         if (m_loadRetVal) {
             alertContainer->clear();
             for (std::shared_ptr<Alert> alertToAdd : m_alertsInStorage) {
@@ -175,8 +185,8 @@ public:
         }
     }
 
-    MOCK_METHOD1(erase, bool(std::shared_ptr<Alert>));
     MOCK_METHOD1(bulkErase, bool(const std::list<std::shared_ptr<Alert>>&));
+    MOCK_METHOD1(erase, bool(std::shared_ptr<Alert>));
     MOCK_METHOD1(modify, bool(std::shared_ptr<Alert>));
     MOCK_METHOD0(clearDatabase, bool());
 
@@ -198,7 +208,11 @@ public:
         return m_conditionVariable.wait_for(lock, TEST_TIMEOUT, [this, newState] { return m_state == newState; });
     }
 
-    void onAlertStateChange(const std::string& alertToken, AlertScheduler::State newState, const std::string& reason) {
+    void onAlertStateChange(
+        const std::string& alertToken,
+        const std::string& alertType,
+        AlertScheduler::State newState,
+        const std::string& reason) {
         std::lock_guard<std::mutex> lock(m_mutex);
         m_state = newState;
         m_conditionVariable.notify_all();
@@ -222,7 +236,22 @@ protected:
     std::chrono::seconds m_alertPastDueTimeLimit;
     std::shared_ptr<AlertScheduler> m_alertScheduler;
     std::shared_ptr<TestAlertObserver> m_testAlertObserver;
+    std::shared_ptr<settings::DeviceSettingsManager> m_settingsManager;
 };
+
+static std::string getFutureInstant(int yearsPlus) {
+    std::chrono::system_clock::time_point now = std::chrono::system_clock::now();
+    time_t tt = std::chrono::system_clock::to_time_t(now);
+    tm utc_tm = *gmtime(&tt);
+    return std::to_string(utc_tm.tm_year + 1900 + yearsPlus) + FUTURE_INSTANT_SUFFIX;
+}
+
+static std::string getTimeNow() {
+    std::string timeNowStr;
+    auto timeNow = std::chrono::system_clock::now();
+    avsCommon::utils::timing::TimeUtils().convertTimeToUtcIso8601Rfc3339(timeNow, &timeNowStr);
+    return timeNowStr;
+}
 
 AlertSchedulerTest::AlertSchedulerTest() :
         m_alertStorage{std::make_shared<MockAlertStorage>()},
@@ -234,6 +263,8 @@ AlertSchedulerTest::AlertSchedulerTest() :
 
 void AlertSchedulerTest::SetUp() {
     m_alertStorage->setOpenRetVal(true);
+    m_settingsManager =
+        std::make_shared<settings::DeviceSettingsManager>(std::make_shared<registrationManager::CustomerDataManager>());
 }
 
 /**
@@ -248,16 +279,17 @@ void AlertSchedulerTest::SetUp() {
  */
 std::shared_ptr<TestAlert> AlertSchedulerTest::doSimpleTestSetup(bool activateAlert, bool initWithAlertObserver) {
     std::vector<std::shared_ptr<TestAlert>> alertToAdd;
-    std::shared_ptr<TestAlert> alert = std::make_shared<TestAlert>(ALERT1_TOKEN, FUTURE_INSTANT);
+    std::shared_ptr<TestAlert> alert = std::make_shared<TestAlert>(ALERT1_TOKEN, getFutureInstant(1));
     alertToAdd.push_back(alert);
     m_alertStorage->setAlerts(alertToAdd);
 
     if (initWithAlertObserver) {
-        m_alertScheduler->initialize(m_testAlertObserver);
+        m_alertScheduler->initialize(m_testAlertObserver, m_settingsManager);
+        ;
     } else {
         std::shared_ptr<AlertScheduler> alertSchedulerObs{
             std::make_shared<AlertScheduler>(m_alertStorage, m_alertRenderer, m_alertPastDueTimeLimit)};
-        m_alertScheduler->initialize(alertSchedulerObs);
+        m_alertScheduler->initialize(alertSchedulerObs, m_settingsManager);
     }
 
     if (activateAlert) {
@@ -271,14 +303,15 @@ std::shared_ptr<TestAlert> AlertSchedulerTest::doSimpleTestSetup(bool activateAl
 /**
  * Test initializing AlertScheduler
  */
-TEST_F(AlertSchedulerTest, initialize) {
+TEST_F(AlertSchedulerTest, test_initialize) {
     /// check if init fails if scheduler is not available
-    ASSERT_FALSE(m_alertScheduler->initialize(nullptr));
+    ASSERT_FALSE(m_alertScheduler->initialize(nullptr, nullptr));
+    ASSERT_FALSE(m_alertScheduler->initialize(nullptr, m_settingsManager));
 
     /// check if init fails if a database for alerts cant be created
     m_alertStorage->setOpenRetVal(false);
     m_alertStorage->setCreateDatabaseRetVal(false);
-    ASSERT_FALSE(m_alertScheduler->initialize(m_alertScheduler));
+    ASSERT_FALSE(m_alertScheduler->initialize(m_alertScheduler, m_settingsManager));
 
     /// check if init succeeds. Pass in 3 alerts of which 1 is expired. Only 2 should actually remain in the end.
     std::shared_ptr<AlertScheduler> alertSchedulerObs{
@@ -291,13 +324,13 @@ TEST_F(AlertSchedulerTest, initialize) {
     alertsToAdd.push_back(alert1);
 
     /// future active alert
-    std::shared_ptr<TestAlert> alert2 = std::make_shared<TestAlert>(ALERT2_TOKEN, FUTURE_INSTANT);
+    std::shared_ptr<TestAlert> alert2 = std::make_shared<TestAlert>(ALERT2_TOKEN, getFutureInstant(1));
     alert2->activate();
     alert2->setStateActive();
     alertsToAdd.push_back(alert2);
 
     /// future inactive alert
-    std::shared_ptr<TestAlert> alert3 = std::make_shared<TestAlert>(ALERT3_TOKEN, FUTURE_INSTANT);
+    std::shared_ptr<TestAlert> alert3 = std::make_shared<TestAlert>(ALERT3_TOKEN, getFutureInstant(1));
     alertsToAdd.push_back(alert3);
     m_alertStorage->setAlerts(alertsToAdd);
 
@@ -307,7 +340,7 @@ TEST_F(AlertSchedulerTest, initialize) {
     /// active alert should get modified
     EXPECT_CALL(*(m_alertStorage.get()), modify(testing::_)).Times(1);
 
-    ASSERT_TRUE(m_alertScheduler->initialize(alertSchedulerObs));
+    ASSERT_TRUE(m_alertScheduler->initialize(alertSchedulerObs, m_settingsManager));
 
     const unsigned int expectedRemainingAlerts = 2;
 
@@ -318,18 +351,18 @@ TEST_F(AlertSchedulerTest, initialize) {
 /**
  * Test AlertScheduler getting focus
  */
-TEST_F(AlertSchedulerTest, updateGetFocus) {
+TEST_F(AlertSchedulerTest, test_updateGetFocus) {
     std::shared_ptr<TestAlert> alert = doSimpleTestSetup();
 
-    /// check if focus changes to foreground
+    // check if focus changes to foreground
     m_alertScheduler->updateFocus(avsCommon::avs::FocusState::FOREGROUND);
     ASSERT_EQ(m_alertScheduler->getFocusState(), avsCommon::avs::FocusState::FOREGROUND);
 
-    /// check if focus changes to background
+    // check if focus changes to background
     m_alertScheduler->updateFocus(avsCommon::avs::FocusState::BACKGROUND);
     ASSERT_EQ(m_alertScheduler->getFocusState(), avsCommon::avs::FocusState::BACKGROUND);
 
-    /// check alert state change if focus is gone
+    // check alert state change if focus is gone
     m_alertScheduler->updateFocus(avsCommon::avs::FocusState::NONE);
     ASSERT_EQ(alert->getState(), Alert::State::STOPPING);
 }
@@ -337,17 +370,17 @@ TEST_F(AlertSchedulerTest, updateGetFocus) {
 /**
  * Test scheduling alerts
  */
-TEST_F(AlertSchedulerTest, scheduleAlert) {
-    /// check that a future alert is scheduled
+TEST_F(AlertSchedulerTest, test_scheduleAlert) {
+    // check that a future alert is scheduled
     std::shared_ptr<TestAlert> alert1 = doSimpleTestSetup(true);
     ASSERT_TRUE(m_alertScheduler->scheduleAlert(alert1));
 
-    /// check that a future alert is not scheduled if you cant store the alert
-    std::shared_ptr<TestAlert> alert2 = std::make_shared<TestAlert>(ALERT2_TOKEN, FUTURE_INSTANT);
+    // check that a future alert is not scheduled if you cant store the alert
+    std::shared_ptr<TestAlert> alert2 = std::make_shared<TestAlert>(ALERT2_TOKEN, getFutureInstant(1));
     m_alertStorage->setStoreRetVal(false);
     ASSERT_FALSE(m_alertScheduler->scheduleAlert(alert2));
 
-    /// check that past alerts cant be scheduled
+    // check that past alerts cant be scheduled
     std::shared_ptr<TestAlert> alert3 = std::make_shared<TestAlert>(ALERT3_TOKEN, PAST_INSTANT);
     m_alertStorage->setStoreRetVal(true);
     ASSERT_TRUE(m_alertScheduler->scheduleAlert(alert2));
@@ -355,64 +388,260 @@ TEST_F(AlertSchedulerTest, scheduleAlert) {
 }
 
 /**
- * Test snoozing alerts
+ * Test update alert scheduled time.
  */
-TEST_F(AlertSchedulerTest, snoozeAlert) {
-    doSimpleTestSetup(true);
+TEST_F(AlertSchedulerTest, test_rescheduleAlert) {
+    // Schedule an alert and create an updated version with the same token.
+    auto oldAlert = doSimpleTestSetup();
+    auto newAlert = std::make_shared<TestAlert>(oldAlert->getToken(), getFutureInstant(2));
+    ASSERT_NE(oldAlert->getScheduledTime_ISO_8601(), newAlert->getScheduledTime_ISO_8601());
 
-    /// check that a random alert token is ignored
-    ASSERT_FALSE(m_alertScheduler->snoozeAlert(ALERT2_TOKEN, FUTURE_INSTANT));
+    // Expect database to be updated with new schedule.
+    EXPECT_CALL(*m_alertStorage, modify(_)).WillOnce(Return(true));
 
-    /// check that we succeed if the correct token is available
-    ASSERT_TRUE(m_alertScheduler->snoozeAlert(ALERT1_TOKEN, FUTURE_INSTANT));
+    // Call schedule alert for an alert that already exists.
+    EXPECT_TRUE(m_alertScheduler->scheduleAlert(newAlert));
+    ASSERT_EQ(oldAlert->getScheduledTime_ISO_8601(), newAlert->getScheduledTime_ISO_8601());
 }
 
 /**
- * Test deleting alerts
+ * Test update alert scheduled time to now will start rendering the alert.
  */
-TEST_F(AlertSchedulerTest, deleteAlert) {
+TEST_F(AlertSchedulerTest, test_rescheduleAlertNow) {
+    // Schedule an alert and create an updated version with the same token.
+    auto oldAlert = doSimpleTestSetup(/*activeAlert*/ false, /*initWithAlertObserver*/ true);
+    auto newAlert = std::make_shared<TestAlert>(oldAlert->getToken(), getTimeNow());
+    ASSERT_NE(oldAlert->getScheduledTime_ISO_8601(), newAlert->getScheduledTime_ISO_8601());
+
+    // Expect database to be updated with new schedule.
+    EXPECT_CALL(*m_alertStorage, modify(_)).WillOnce(Return(true));
+
+    // Call schedule alert for an alert that already exists.
+    EXPECT_TRUE(m_alertScheduler->scheduleAlert(newAlert));
+    ASSERT_EQ(oldAlert->getScheduledTime_ISO_8601(), newAlert->getScheduledTime_ISO_8601());
+
+    // Wait till alarm is ready to be rendered.
+    EXPECT_TRUE(m_testAlertObserver->waitFor(AlertObserverInterface::State::READY));
+}
+
+/**
+ * Test update alert scheduled time fails.
+ */
+TEST_F(AlertSchedulerTest, test_rescheduleAlertFails) {
+    // Schedule an alert and create an updated version with the same token.
+    auto oldAlert = doSimpleTestSetup();
+    auto newAlert = std::make_shared<TestAlert>(oldAlert->getToken(), getFutureInstant(2));
+    auto oldScheduledTime = oldAlert->getScheduledTime_ISO_8601();
+    ASSERT_NE(newAlert->getScheduledTime_ISO_8601(), oldScheduledTime);
+
+    // Simulate database failure.
+    EXPECT_CALL(*m_alertStorage, modify(_)).WillOnce(Return(false));
+
+    // Call schedule alert for an alert that already exists.
+    EXPECT_FALSE(m_alertScheduler->scheduleAlert(newAlert));
+    EXPECT_EQ(oldAlert->getScheduledTime_ISO_8601(), oldScheduledTime);
+}
+
+/**
+ * Test snoozing alerts
+ */
+TEST_F(AlertSchedulerTest, test_snoozeAlert) {
+    doSimpleTestSetup(true);
+
+    // check that a random alert token is ignored
+    ASSERT_FALSE(m_alertScheduler->snoozeAlert(ALERT2_TOKEN, getFutureInstant(1)));
+
+    // check that we succeed if the correct token is available
+    ASSERT_TRUE(m_alertScheduler->snoozeAlert(ALERT1_TOKEN, getFutureInstant(1)));
+}
+
+/**
+ * Test deleting single alert
+ */
+TEST_F(AlertSchedulerTest, test_deleteAlertSingle) {
     std::shared_ptr<AlertScheduler> alertSchedulerObs{
         std::make_shared<AlertScheduler>(m_alertStorage, m_alertRenderer, m_alertPastDueTimeLimit)};
     std::vector<std::shared_ptr<TestAlert>> alertsToAdd;
-    std::shared_ptr<TestAlert> alert1 = std::make_shared<TestAlert>(ALERT1_TOKEN, FUTURE_INSTANT);
+    std::shared_ptr<TestAlert> alert1 = std::make_shared<TestAlert>(ALERT1_TOKEN, getFutureInstant(1));
     alertsToAdd.push_back(alert1);
     m_alertStorage->setAlerts(alertsToAdd);
-    m_alertScheduler->initialize(alertSchedulerObs);
+    m_alertScheduler->initialize(alertSchedulerObs, m_settingsManager);
     m_alertScheduler->updateFocus(avsCommon::avs::FocusState::BACKGROUND);
 
-    /// if active alert and the token matches, ensure that we dont delete it (we deactivate the alert actually)
+    // if active alert and the token matches, ensure that we dont delete it (we deactivate the alert actually)
     EXPECT_CALL(*(m_alertStorage.get()), erase(testing::_)).Times(0);
     ASSERT_TRUE(m_alertScheduler->deleteAlert(ALERT1_TOKEN));
 
-    /// check that a random alert token is ignored
+    // check that a random alert token is ignored
     ASSERT_TRUE(m_alertScheduler->deleteAlert(ALERT2_TOKEN));
 
-    /// if inactive alert, then check that we succeed if the correct token is available
-    std::shared_ptr<TestAlert> alert2 = std::make_shared<TestAlert>(ALERT2_TOKEN, FUTURE_INSTANT);
+    // if inactive alert, then check that we succeed if the correct token is available
+    std::shared_ptr<TestAlert> alert2 = std::make_shared<TestAlert>(ALERT2_TOKEN, getFutureInstant(1));
     alertsToAdd.push_back(alert2);
     m_alertStorage->setAlerts(alertsToAdd);
-    m_alertScheduler->initialize(alertSchedulerObs);
+    m_alertScheduler->initialize(alertSchedulerObs, m_settingsManager);
     EXPECT_CALL(*(m_alertStorage.get()), erase(testing::_)).Times(1);
     ASSERT_TRUE(m_alertScheduler->deleteAlert(ALERT2_TOKEN));
 }
 
 /**
+ * Test deleting multiple alerts - one at a time
+ */
+TEST_F(AlertSchedulerTest, test_bulkDeleteAlertsSingle) {
+    std::shared_ptr<AlertScheduler> alertSchedulerObs{
+        std::make_shared<AlertScheduler>(m_alertStorage, m_alertRenderer, m_alertPastDueTimeLimit)};
+    std::vector<std::shared_ptr<TestAlert>> alertsToAdd;
+    std::shared_ptr<TestAlert> alert1 = std::make_shared<TestAlert>(ALERT1_TOKEN, getFutureInstant(1));
+    std::shared_ptr<TestAlert> alert2 = std::make_shared<TestAlert>(ALERT2_TOKEN, getFutureInstant(2));
+
+    ON_CALL(*m_alertStorage.get(), bulkErase(_)).WillByDefault(Return(true));
+
+    alertsToAdd.push_back(alert1);
+    alertsToAdd.push_back(alert2);
+    m_alertStorage->setAlerts(alertsToAdd);
+    m_alertScheduler->initialize(alertSchedulerObs, m_settingsManager);
+
+    // Delete one existing
+    ASSERT_EQ(m_alertScheduler->getAllAlerts().size(), 2u);
+    EXPECT_TRUE(m_alertScheduler->deleteAlerts({ALERT1_TOKEN}));
+    ASSERT_EQ(m_alertScheduler->getAllAlerts().size(), 1u);
+
+    // Delete one non-existing
+    EXPECT_TRUE(m_alertScheduler->deleteAlerts({ALERT3_TOKEN}));
+    ASSERT_EQ(m_alertScheduler->getAllAlerts().size(), 1u);
+
+    // Delete the last existing
+    EXPECT_TRUE(m_alertScheduler->deleteAlerts({ALERT2_TOKEN}));
+    ASSERT_EQ(m_alertScheduler->getAllAlerts().size(), 0u);
+}
+
+/**
+ * Test deleting multiple existing alerts
+ */
+TEST_F(AlertSchedulerTest, test_bulkDeleteAlertsMultipleExisting) {
+    std::shared_ptr<AlertScheduler> alertSchedulerObs{
+        std::make_shared<AlertScheduler>(m_alertStorage, m_alertRenderer, m_alertPastDueTimeLimit)};
+    std::vector<std::shared_ptr<TestAlert>> alertsToAdd;
+    std::shared_ptr<TestAlert> alert1 = std::make_shared<TestAlert>(ALERT1_TOKEN, getFutureInstant(1));
+    std::shared_ptr<TestAlert> alert2 = std::make_shared<TestAlert>(ALERT2_TOKEN, getFutureInstant(2));
+
+    ON_CALL(*m_alertStorage.get(), bulkErase(_)).WillByDefault(Return(true));
+
+    alertsToAdd.push_back(alert1);
+    alertsToAdd.push_back(alert2);
+    m_alertStorage->setAlerts(alertsToAdd);
+    m_alertScheduler->initialize(alertSchedulerObs, m_settingsManager);
+
+    // Delete multiple existing
+    EXPECT_TRUE(m_alertScheduler->deleteAlerts({ALERT1_TOKEN, ALERT2_TOKEN}));
+    EXPECT_EQ(m_alertScheduler->getAllAlerts().size(), 0u);
+}
+
+/**
+ * Test deleting multiple alerts, both existing and not
+ */
+TEST_F(AlertSchedulerTest, test_bulkDeleteAlertsMultipleMixed) {
+    std::shared_ptr<AlertScheduler> alertSchedulerObs{
+        std::make_shared<AlertScheduler>(m_alertStorage, m_alertRenderer, m_alertPastDueTimeLimit)};
+    std::vector<std::shared_ptr<TestAlert>> alertsToAdd;
+    std::shared_ptr<TestAlert> alert1 = std::make_shared<TestAlert>(ALERT1_TOKEN, getFutureInstant(1));
+    std::shared_ptr<TestAlert> alert2 = std::make_shared<TestAlert>(ALERT2_TOKEN, getFutureInstant(2));
+
+    ON_CALL(*m_alertStorage.get(), bulkErase(_)).WillByDefault(Return(true));
+
+    alertsToAdd.push_back(alert1);
+    alertsToAdd.push_back(alert2);
+    m_alertStorage->setAlerts(alertsToAdd);
+    m_alertScheduler->initialize(alertSchedulerObs, m_settingsManager);
+
+    // Delete multiple mixed
+    EXPECT_TRUE(m_alertScheduler->deleteAlerts({ALERT1_TOKEN, ALERT3_TOKEN}));
+    EXPECT_EQ(m_alertScheduler->getAllAlerts().size(), 1u);
+}
+
+/**
+ * Test deleting multiple non-existing alerts
+ */
+TEST_F(AlertSchedulerTest, test_bulkDeleteAlertsMultipleMissing) {
+    std::shared_ptr<AlertScheduler> alertSchedulerObs{
+        std::make_shared<AlertScheduler>(m_alertStorage, m_alertRenderer, m_alertPastDueTimeLimit)};
+    std::vector<std::shared_ptr<TestAlert>> alertsToAdd;
+    std::shared_ptr<TestAlert> alert1 = std::make_shared<TestAlert>(ALERT1_TOKEN, getFutureInstant(1));
+    std::shared_ptr<TestAlert> alert2 = std::make_shared<TestAlert>(ALERT2_TOKEN, getFutureInstant(2));
+
+    ON_CALL(*m_alertStorage.get(), bulkErase(_)).WillByDefault(Return(true));
+
+    alertsToAdd.push_back(alert1);
+    alertsToAdd.push_back(alert2);
+    m_alertStorage->setAlerts(alertsToAdd);
+    m_alertScheduler->initialize(alertSchedulerObs, m_settingsManager);
+
+    // Delete multiple non-existing
+    EXPECT_TRUE(m_alertScheduler->deleteAlerts({ALERT3_TOKEN, ALERT4_TOKEN}));
+    EXPECT_EQ(m_alertScheduler->getAllAlerts().size(), 2u);
+}
+
+/**
+ * Test deleting same alerts multiple times
+ */
+TEST_F(AlertSchedulerTest, test_bulkDeleteAlertsMultipleSame) {
+    std::shared_ptr<AlertScheduler> alertSchedulerObs{
+        std::make_shared<AlertScheduler>(m_alertStorage, m_alertRenderer, m_alertPastDueTimeLimit)};
+    std::vector<std::shared_ptr<TestAlert>> alertsToAdd;
+    std::shared_ptr<TestAlert> alert1 = std::make_shared<TestAlert>(ALERT1_TOKEN, getFutureInstant(1));
+    std::shared_ptr<TestAlert> alert2 = std::make_shared<TestAlert>(ALERT2_TOKEN, getFutureInstant(2));
+
+    ON_CALL(*m_alertStorage.get(), bulkErase(_)).WillByDefault(Return(true));
+
+    alertsToAdd.push_back(alert1);
+    alertsToAdd.push_back(alert2);
+    m_alertStorage->setAlerts(alertsToAdd);
+    m_alertScheduler->initialize(alertSchedulerObs, m_settingsManager);
+
+    // Delete same multiple times
+    EXPECT_TRUE(m_alertScheduler->deleteAlerts({ALERT1_TOKEN, ALERT1_TOKEN}));
+    EXPECT_EQ(m_alertScheduler->getAllAlerts().size(), 1u);
+}
+
+/**
+ * Test bulk deleting with empty list
+ */
+TEST_F(AlertSchedulerTest, test_bulkDeleteAlertsMultipleEmpty) {
+    std::shared_ptr<AlertScheduler> alertSchedulerObs{
+        std::make_shared<AlertScheduler>(m_alertStorage, m_alertRenderer, m_alertPastDueTimeLimit)};
+    std::vector<std::shared_ptr<TestAlert>> alertsToAdd;
+    std::shared_ptr<TestAlert> alert1 = std::make_shared<TestAlert>(ALERT1_TOKEN, getFutureInstant(1));
+    std::shared_ptr<TestAlert> alert2 = std::make_shared<TestAlert>(ALERT2_TOKEN, getFutureInstant(2));
+
+    ON_CALL(*m_alertStorage.get(), bulkErase(_)).WillByDefault(Return(true));
+
+    alertsToAdd.push_back(alert1);
+    alertsToAdd.push_back(alert2);
+    m_alertStorage->setAlerts(alertsToAdd);
+    m_alertScheduler->initialize(alertSchedulerObs, m_settingsManager);
+
+    // Delete empty
+    EXPECT_TRUE(m_alertScheduler->deleteAlerts({}));
+    EXPECT_EQ(m_alertScheduler->getAllAlerts().size(), 2u);
+}
+
+/**
  * Test method that checks if an alert is active
  */
-TEST_F(AlertSchedulerTest, isAlertActive) {
+TEST_F(AlertSchedulerTest, test_isAlertActive) {
     std::shared_ptr<AlertScheduler> alertSchedulerObs{
         std::make_shared<AlertScheduler>(m_alertStorage, m_alertRenderer, m_alertPastDueTimeLimit)};
     std::vector<std::shared_ptr<TestAlert>> alertsToAdd;
 
     /// active alert
-    std::shared_ptr<TestAlert> alert1 = std::make_shared<TestAlert>(ALERT1_TOKEN, FUTURE_INSTANT);
+    std::shared_ptr<TestAlert> alert1 = std::make_shared<TestAlert>(ALERT1_TOKEN, getFutureInstant(1));
     alertsToAdd.push_back(alert1);
     m_alertStorage->setAlerts(alertsToAdd);
-    m_alertScheduler->initialize(alertSchedulerObs);
+    m_alertScheduler->initialize(alertSchedulerObs, m_settingsManager);
     m_alertScheduler->updateFocus(avsCommon::avs::FocusState::BACKGROUND);
 
     /// inactive alert
-    std::shared_ptr<TestAlert> alert2 = std::make_shared<TestAlert>(ALERT2_TOKEN, FUTURE_INSTANT);
+    std::shared_ptr<TestAlert> alert2 = std::make_shared<TestAlert>(ALERT2_TOKEN, getFutureInstant(1));
     alertsToAdd.push_back(alert2);
     m_alertStorage->setAlerts(alertsToAdd);
 
@@ -426,18 +655,18 @@ TEST_F(AlertSchedulerTest, isAlertActive) {
 /**
  * Test to see if the correct context about the scheduler is obtained
  */
-TEST_F(AlertSchedulerTest, getContextInfo) {
+TEST_F(AlertSchedulerTest, test_getContextInfo) {
     std::shared_ptr<AlertScheduler> alertSchedulerObs{
         std::make_shared<AlertScheduler>(m_alertStorage, m_alertRenderer, m_alertPastDueTimeLimit)};
     std::vector<std::shared_ptr<TestAlert>> alertsToAdd;
 
     /// Schedule 2 alerts one of which is active.
-    std::shared_ptr<TestAlert> alert1 = std::make_shared<TestAlert>(ALERT1_TOKEN, FUTURE_INSTANT);
+    std::shared_ptr<TestAlert> alert1 = std::make_shared<TestAlert>(ALERT1_TOKEN, getFutureInstant(1));
     alertsToAdd.push_back(alert1);
-    std::shared_ptr<TestAlert> alert2 = std::make_shared<TestAlert>(ALERT2_TOKEN, FUTURE_INSTANT);
+    std::shared_ptr<TestAlert> alert2 = std::make_shared<TestAlert>(ALERT2_TOKEN, getFutureInstant(1));
     alertsToAdd.push_back(alert2);
     m_alertStorage->setAlerts(alertsToAdd);
-    m_alertScheduler->initialize(alertSchedulerObs);
+    m_alertScheduler->initialize(alertSchedulerObs, m_settingsManager);
     m_alertScheduler->updateFocus(avsCommon::avs::FocusState::BACKGROUND);
 
     AlertScheduler::AlertsContextInfo resultContextInfo = m_alertScheduler->getContextInfo();
@@ -453,7 +682,7 @@ TEST_F(AlertSchedulerTest, getContextInfo) {
 /**
  * Test local stop on AlertScheduler
  */
-TEST_F(AlertSchedulerTest, onLocalStop) {
+TEST_F(AlertSchedulerTest, test_onLocalStop) {
     std::shared_ptr<TestAlert> alert = doSimpleTestSetup(true);
 
     m_alertScheduler->onLocalStop();
@@ -465,7 +694,7 @@ TEST_F(AlertSchedulerTest, onLocalStop) {
 /**
  * Test if AlertScheduler clears data
  */
-TEST_F(AlertSchedulerTest, clearData) {
+TEST_F(AlertSchedulerTest, test_clearData) {
     std::shared_ptr<TestAlert> alert = doSimpleTestSetup(true);
     EXPECT_CALL(*(m_alertStorage.get()), clearDatabase()).Times(1);
 
@@ -478,7 +707,7 @@ TEST_F(AlertSchedulerTest, clearData) {
 /**
  * Test if AlertScheduler clears data
  */
-TEST_F(AlertSchedulerTest, clearDataLogout) {
+TEST_F(AlertSchedulerTest, test_clearDataLogout) {
     std::shared_ptr<TestAlert> alert = doSimpleTestSetup(true);
     EXPECT_CALL(*(m_alertStorage.get()), clearDatabase()).Times(1);
 
@@ -491,7 +720,7 @@ TEST_F(AlertSchedulerTest, clearDataLogout) {
 /**
  * Test if AlertScheduler shuts down appropriately
  */
-TEST_F(AlertSchedulerTest, shutdown) {
+TEST_F(AlertSchedulerTest, test_shutdown) {
     doSimpleTestSetup(true);
 
     m_alertScheduler->shutdown();
@@ -504,7 +733,7 @@ TEST_F(AlertSchedulerTest, shutdown) {
 /**
  * Test Alert state change to Active on an inactive alert
  */
-TEST_F(AlertSchedulerTest, onAlertStateChangeStartedInactiveAlert) {
+TEST_F(AlertSchedulerTest, test_onAlertStateChangeStartedInactiveAlert) {
     const std::string testReason = "stateStarted";
     auto testState = AlertScheduler::State::STARTED;
 
@@ -512,13 +741,13 @@ TEST_F(AlertSchedulerTest, onAlertStateChangeStartedInactiveAlert) {
 
     /// check that we ignore inactive alerts
     EXPECT_CALL(*(m_alertStorage.get()), modify(testing::_)).Times(0);
-    m_alertScheduler->onAlertStateChange(ALERT1_TOKEN, testState, testReason);
+    m_alertScheduler->onAlertStateChange(ALERT1_TOKEN, ALERT_TYPE, testState, testReason);
 }
 
 /**
  * Test Alert state change to Active on an active alert
  */
-TEST_F(AlertSchedulerTest, onAlertStateChangeStartedActiveAlert) {
+TEST_F(AlertSchedulerTest, test_onAlertStateChangeStartedActiveAlert) {
     const std::string testReason = "stateStarted";
     auto testState = AlertScheduler::State::STARTED;
 
@@ -526,77 +755,77 @@ TEST_F(AlertSchedulerTest, onAlertStateChangeStartedActiveAlert) {
 
     /// active alerts should be handled
     EXPECT_CALL(*(m_alertStorage.get()), modify(testing::_)).Times(1);
-    m_alertScheduler->onAlertStateChange(ALERT1_TOKEN, testState, testReason);
+    m_alertScheduler->onAlertStateChange(ALERT1_TOKEN, ALERT_TYPE, testState, testReason);
     ASSERT_TRUE(m_testAlertObserver->waitFor(testState));
 }
 
 /**
  * Test Alert state change to Stopped
  */
-TEST_F(AlertSchedulerTest, onAlertStateChangeStopped) {
+TEST_F(AlertSchedulerTest, test_onAlertStateChangeStopped) {
     const std::string testReason = "stateStopped";
     auto testState = AlertScheduler::State::STOPPED;
 
     doSimpleTestSetup(true, true);
 
     EXPECT_CALL(*(m_alertStorage.get()), erase(testing::_)).Times(1);
-    m_alertScheduler->onAlertStateChange(ALERT1_TOKEN, testState, testReason);
+    m_alertScheduler->onAlertStateChange(ALERT1_TOKEN, ALERT_TYPE, testState, testReason);
     ASSERT_TRUE(m_testAlertObserver->waitFor(testState));
 }
 
 /**
  * Test Alert state change to Completed
  */
-TEST_F(AlertSchedulerTest, onAlertStateChangeCompleted) {
+TEST_F(AlertSchedulerTest, test_onAlertStateChangeCompleted) {
     const std::string testReason = "stateCompleted";
     auto testState = AlertScheduler::State::COMPLETED;
 
     doSimpleTestSetup(true, true);
 
     EXPECT_CALL(*(m_alertStorage.get()), erase(testing::_)).Times(1);
-    m_alertScheduler->onAlertStateChange(ALERT1_TOKEN, testState, testReason);
+    m_alertScheduler->onAlertStateChange(ALERT1_TOKEN, ALERT_TYPE, testState, testReason);
     ASSERT_TRUE(m_testAlertObserver->waitFor(testState));
 }
 
 /**
  * Test Alert state change to Snoozed
  */
-TEST_F(AlertSchedulerTest, onAlertStateChangeSnoozed) {
+TEST_F(AlertSchedulerTest, test_onAlertStateChangeSnoozed) {
     const std::string testReason = "stateSnoozed";
     auto testState = AlertScheduler::State::SNOOZED;
 
     doSimpleTestSetup(true, true);
 
     EXPECT_CALL(*(m_alertStorage.get()), modify(testing::_)).Times(1);
-    m_alertScheduler->onAlertStateChange(ALERT1_TOKEN, testState, testReason);
+    m_alertScheduler->onAlertStateChange(ALERT1_TOKEN, ALERT_TYPE, testState, testReason);
     ASSERT_TRUE(m_testAlertObserver->waitFor(testState));
 }
 
 /**
  * Test Alert state change to Error on an active alert
  */
-TEST_F(AlertSchedulerTest, onAlertStateChangeErrorActiveAlert) {
+TEST_F(AlertSchedulerTest, test_onAlertStateChangeErrorActiveAlert) {
     const std::string testReason = "stateError";
     auto testState = AlertScheduler::State::ERROR;
 
     doSimpleTestSetup(true, true);
 
     EXPECT_CALL(*(m_alertStorage.get()), erase(testing::_)).Times(1);
-    m_alertScheduler->onAlertStateChange(ALERT1_TOKEN, testState, testReason);
+    m_alertScheduler->onAlertStateChange(ALERT1_TOKEN, ALERT_TYPE, testState, testReason);
     ASSERT_TRUE(m_testAlertObserver->waitFor(testState));
 }
 
 /**
  * Test Alert state change to Error on an inactive alert
  */
-TEST_F(AlertSchedulerTest, onAlertStateChangeErrorInactiveAlert) {
+TEST_F(AlertSchedulerTest, test_onAlertStateChangeErrorInactiveAlert) {
     const std::string testReason = "stateError";
     auto testState = AlertScheduler::State::ERROR;
 
     doSimpleTestSetup(false, true);
 
     EXPECT_CALL(*(m_alertStorage.get()), erase(testing::_)).Times(1);
-    m_alertScheduler->onAlertStateChange(ALERT1_TOKEN, testState, testReason);
+    m_alertScheduler->onAlertStateChange(ALERT1_TOKEN, ALERT_TYPE, testState, testReason);
     ASSERT_TRUE(m_testAlertObserver->waitFor(testState));
 }
 

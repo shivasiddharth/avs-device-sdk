@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * Copyright 2017-2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License").
  * You may not use this file except in compliance with the License.
@@ -145,13 +145,13 @@ void UserInactivityMonitor::startTimer() {
     m_eventTimer.start(
         m_sendPeriod,
         Timer::PeriodType::ABSOLUTE,
-        Timer::FOREVER,
+        Timer::getForever(),
         std::bind(&UserInactivityMonitor::sendInactivityReport, this));
 }
 
 DirectiveHandlerConfiguration UserInactivityMonitor::getConfiguration() const {
-    return DirectiveHandlerConfiguration{
-        {NamespaceAndName{USER_INACTIVITY_MONITOR_NAMESPACE, RESET_DIRECTIVE_NAME}, BlockingPolicy::NON_BLOCKING}};
+    return DirectiveHandlerConfiguration{{NamespaceAndName{USER_INACTIVITY_MONITOR_NAMESPACE, RESET_DIRECTIVE_NAME},
+                                          BlockingPolicy(BlockingPolicy::MEDIUMS_NONE, false)}};
 }
 
 void UserInactivityMonitor::handleDirectiveImmediately(std::shared_ptr<AVSDirective> directive) {

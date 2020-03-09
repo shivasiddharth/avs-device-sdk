@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * Copyright 2017-2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License").
  * You may not use this file except in compliance with the License.
@@ -16,11 +16,11 @@
 #ifndef ALEXA_CLIENT_SDK_AVSCOMMON_SDKINTERFACES_INCLUDE_AVSCOMMON_SDKINTERFACES_EXTERNALMEDIAADAPTERINTERFACE_H_
 #define ALEXA_CLIENT_SDK_AVSCOMMON_SDKINTERFACES_INCLUDE_AVSCOMMON_SDKINTERFACES_EXTERNALMEDIAADAPTERINTERFACE_H_
 
-#include "AVSCommon/Utils/RequiresShutdown.h"
-
 #include <chrono>
+#include <set>
 #include <string>
-#include <vector>
+
+#include "AVSCommon/Utils/RequiresShutdown.h"
 
 namespace alexaClientSDK {
 namespace avsCommon {
@@ -139,7 +139,7 @@ enum class SupportedPlaybackOperation {
     /// Previous
     PREVIOUS,
 
-    /// Starover a track from the beginning
+    /// Start over a track from the beginning
     START_OVER,
 
     /// Fast-forward
@@ -193,7 +193,7 @@ enum class ChangeCauseType {
     /// Change was triggered by a rule.
     RULE_TRIGGER,
 
-    /// Change was triggerd by periodic polling.
+    /// Change was triggered by periodic polling.
     PERIODIC_POLL
 };
 
@@ -287,11 +287,11 @@ struct AdapterPlaybackState {
     /// The playerId of an adapter which is the pre-negotiated business id for a partner music provider.
     std::string playerId;
 
-    /// The state of the default player - IDLE/STOPPED/PLAYING...
+    /// The players current state
     std::string state;
 
     /// The set of states the default player can move into from its current state.
-    std::vector<SupportedPlaybackOperation> supportedOperations;
+    std::set<SupportedPlaybackOperation> supportedOperations;
 
     /// The offset of the track in milliseconds.
     std::chrono::milliseconds trackOffset;
@@ -391,9 +391,9 @@ public:
     /**
      * ExternalMediaAdapterInterface constructor.
      *
-     * @param adapaterName The name of the adapter.
+     * @param adapterName The name of the adapter.
      */
-    ExternalMediaAdapterInterface(const std::string& adapaterName);
+    explicit ExternalMediaAdapterInterface(const std::string& adapterName);
 
     /**
      * Destructor.
@@ -457,6 +457,13 @@ public:
 
     /// Method to fetch the state(session state and playback state) of an adapter.
     virtual AdapterState getState() = 0;
+
+    /**
+     * This function retrieves the offset of the current track the adapter is handling.
+     *
+     * @return This returns the offset in milliseconds.
+     */
+    virtual std::chrono::milliseconds getOffset() = 0;
 };
 
 inline AdapterSessionState::AdapterSessionState() : loggedIn{false}, isGuest{false}, launched{false}, active{false} {

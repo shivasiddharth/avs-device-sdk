@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * Copyright 2017-2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License").
  * You may not use this file except in compliance with the License.
@@ -56,7 +56,7 @@ const NamespaceAndName PLAYER_ERROR_EVENT("ExternalMediaPlayer", "PlayerError");
 const char DEFAULT_STATE[] = "IDLE";
 
 rapidjson::Value buildSupportedOperations(
-    const std::vector<SupportedPlaybackOperation>& supportedOperations,
+    const std::set<SupportedPlaybackOperation>& supportedOperations,
     rapidjson::Document::AllocatorType& allocator) {
     rapidjson::Value opArray(rapidjson::kArrayType);
 
@@ -143,7 +143,6 @@ bool buildDefaultPlayerState(rapidjson::Value* document, rapidjson::Document::Al
     document->AddMember(REPEAT, REPEAT_STATUS_STRING(false), allocator);
     document->AddMember(FAVORITE, RatingToString(Favorites::NOT_RATED), allocator);
     document->AddMember(POSITIONINMS, 0, allocator);
-    document->AddMember(UNCERTAINITYINMS, 0, allocator);
 
     return true;
 }

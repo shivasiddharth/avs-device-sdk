@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * Copyright 2017-2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License").
  * You may not use this file except in compliance with the License.
@@ -64,6 +64,16 @@ std::ostream& operator<<(std::ostream& stream, const NotificationRenderer::State
     return stream;
 }
 
+void NotificationRenderer::doShutdown() {
+    ACSDK_DEBUG5(LX(__func__));
+    if (m_mediaPlayer) {
+        m_mediaPlayer->removeObserver(shared_from_this());
+    }
+
+    std::lock_guard<std::mutex> lock(m_mutex);
+    m_observers.clear();
+}
+
 std::shared_ptr<NotificationRenderer> NotificationRenderer::create(std::shared_ptr<MediaPlayerInterface> mediaPlayer) {
     ACSDK_DEBUG5(LX("create"));
     if (!mediaPlayer) {
@@ -71,7 +81,7 @@ std::shared_ptr<NotificationRenderer> NotificationRenderer::create(std::shared_p
         return nullptr;
     }
     std::shared_ptr<NotificationRenderer> result(new NotificationRenderer(mediaPlayer));
-    mediaPlayer->setObserver(result);
+    mediaPlayer->addObserver(result);
     return result;
 }
 
@@ -149,7 +159,11 @@ bool NotificationRenderer::cancelNotificationRendering() {
     return true;
 }
 
-void NotificationRenderer::onPlaybackStarted(SourceId sourceId) {
+void NotificationRenderer::onFirstByteRead(SourceId sourceId, const MediaPlayerState&) {
+    ACSDK_DEBUG5(LX(__func__).d("sourceId", sourceId));
+}
+
+void NotificationRenderer::onPlaybackStarted(SourceId sourceId, const MediaPlayerState&) {
     ACSDK_DEBUG5(LX("onPlaybackStarted").d("sourceId", sourceId));
     if (sourceId != m_sourceId) {
         ACSDK_ERROR(LX("onPlaybackStartedFailed").d("reason", "unexpectedSourceId").d("expected", m_sourceId));
@@ -160,7 +174,7 @@ void NotificationRenderer::onPlaybackStarted(SourceId sourceId) {
     }
 }
 
-void NotificationRenderer::onPlaybackStopped(SourceId sourceId) {
+void NotificationRenderer::onPlaybackStopped(SourceId sourceId, const MediaPlayerState&) {
     ACSDK_DEBUG5(LX("onPlaybackStopped").d("sourceId", sourceId));
     if (sourceId != m_sourceId) {
         ACSDK_ERROR(LX("onPlaybackStoppedFailed").d("reason", "unexpectedSourceId").d("expected", m_sourceId));
@@ -169,7 +183,7 @@ void NotificationRenderer::onPlaybackStopped(SourceId sourceId) {
     onRenderingFinished(sourceId);
 }
 
-void NotificationRenderer::onPlaybackFinished(SourceId sourceId) {
+void NotificationRenderer::onPlaybackFinished(SourceId sourceId, const MediaPlayerState&) {
     ACSDK_DEBUG5(LX("onPlaybackFinished").d("sourceId", sourceId));
     if (sourceId != m_sourceId) {
         ACSDK_ERROR(LX("onPlaybackFinishedFailed").d("reason", "unexpectedSourceId").d("expected", m_sourceId));
@@ -178,7 +192,11 @@ void NotificationRenderer::onPlaybackFinished(SourceId sourceId) {
     onRenderingFinished(sourceId);
 }
 
-void NotificationRenderer::onPlaybackError(SourceId sourceId, const ErrorType& type, std::string error) {
+void NotificationRenderer::onPlaybackError(
+    SourceId sourceId,
+    const ErrorType& type,
+    std::string error,
+    const MediaPlayerState&) {
     ACSDK_DEBUG5(LX("onPlaybackError").d("sourceId", sourceId).d("type", type).d("error", error));
 
     if (sourceId != m_sourceId) {
@@ -220,6 +238,7 @@ void NotificationRenderer::onPlaybackError(SourceId sourceId, const ErrorType& t
 }
 
 NotificationRenderer::NotificationRenderer(std::shared_ptr<MediaPlayerInterface> mediaPlayer) :
+        RequiresShutdown{"NotificationRenderer"},
         m_mediaPlayer{mediaPlayer},
         m_state{State::IDLE},
         m_sourceId{MediaPlayerInterface::ERROR} {

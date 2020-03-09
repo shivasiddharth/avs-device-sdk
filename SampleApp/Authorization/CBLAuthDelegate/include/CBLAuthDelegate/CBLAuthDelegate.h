@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * Copyright 2018-2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License").
  * You may not use this file except in compliance with the License.
@@ -43,7 +43,7 @@ namespace cblAuthDelegate {
 /**
  * CBLAuthDelegate provides an implementation of the @c AuthDelegateInterface using the Code-Based Linking
  * authorization process.
- * @see https://developer.amazon.com/docs/alexa-voice-service/code-based-linking-other-platforms.html
+ * @see https://developer.amazon.com/docs/alexa/alexa-voice-service/code-based-linking-other-platforms.html
  */
 class CBLAuthDelegate
         : public avsCommon::sdkInterfaces::AuthDelegateInterface
@@ -97,6 +97,7 @@ public:
     void addAuthObserver(std::shared_ptr<avsCommon::sdkInterfaces::AuthObserverInterface> observer) override;
     void removeAuthObserver(std::shared_ptr<avsCommon::sdkInterfaces::AuthObserverInterface> observer) override;
     std::string getAuthToken() override;
+    void onAuthFailure(const std::string& token) override;
     /// @}
 
     /// @name CustomerDataHandler methods
@@ -351,6 +352,9 @@ private:
 
     /// True if the refresh token has not yet been used to create an access token.
     bool m_newRefreshToken;
+
+    /// True if an authorization failure was reported for the current value of m_accessToken.
+    bool m_authFailureReported;
 };
 
 }  // namespace cblAuthDelegate

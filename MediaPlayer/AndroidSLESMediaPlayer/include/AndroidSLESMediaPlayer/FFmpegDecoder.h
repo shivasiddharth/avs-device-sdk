@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * Copyright 2018-2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License").
  * You may not use this file except in compliance with the License.
@@ -24,8 +24,14 @@
 #include <string>
 #include <utility>
 
+extern "C" {
+#include <libavutil/samplefmt.h>
+}
+
 #include "AndroidSLESMediaPlayer/DecoderInterface.h"
 #include "AndroidSLESMediaPlayer/FFmpegInputControllerInterface.h"
+#include "AndroidSLESMediaPlayer/PlaybackConfiguration.h"
+#include "AVSCommon/Utils/MediaPlayer/SourceConfig.h"
 
 struct AVCodec;
 struct AVCodecContext;
@@ -35,10 +41,15 @@ struct AVFrame;
 struct AVInputFormat;
 struct AVIOContext;
 struct SwrContext;
+struct AVFilterGraph;
+struct AVFilterContext;
 
 namespace alexaClientSDK {
 namespace mediaPlayer {
 namespace android {
+
+/// The layout mask representing which channels should be enabled.
+using LayoutMask = int64_t;
 
 /**
  * Class responsible for decoding and re-sampling the audio from an input controller.
@@ -56,13 +67,17 @@ public:
      * Creates a new decoder buffer queue that reads input data using the given controller.
      *
      * @param inputController The controller used to retrieve input data.
+     * @param outputConfig The decoder output configuration.
      * @return The new decoder buffer queue if create succeeds, @c nullptr otherwise.
      */
-    static std::unique_ptr<FFmpegDecoder> create(std::unique_ptr<FFmpegInputControllerInterface> inputController);
+    static std::unique_ptr<FFmpegDecoder> create(
+        std::unique_ptr<FFmpegInputControllerInterface> inputController,
+        const PlaybackConfiguration& outputConfig,
+        const avsCommon::utils::mediaPlayer::SourceConfig& config = avsCommon::utils::mediaPlayer::emptySourceConfig());
 
     /// @name DecoderInterface method overrides.
     /// @{
-    std::pair<Status, size_t> read(int16_t* buffer, size_t size) override;
+    std::pair<Status, size_t> read(Byte* buffer, size_t size) override;
     void abort() override;
     /// @}
 
@@ -86,8 +101,16 @@ private:
      * Constructor.
      *
      * @param inputController A controller for the input encoded data.
+     * @param format The output sample format.
+     * @param layout The output channels layout.
+     * @param sampleRate The output sample rate in Hz.
      */
-    FFmpegDecoder(std::unique_ptr<FFmpegInputControllerInterface> inputController);
+    FFmpegDecoder(
+        std::unique_ptr<FFmpegInputControllerInterface> inputController,
+        AVSampleFormat format,
+        LayoutMask layout,
+        int sampleRate,
+        const avsCommon::utils::mediaPlayer::SourceConfig& config);
 
     /**
      * This enumeration represents the states that the decoder can be in. The possible transitions are:
@@ -131,8 +154,14 @@ private:
      */
     class UnreadData {
     public:
-        /// Constructor
-        UnreadData();
+        /**
+         * Constructor
+         *
+         * @param format The output sample format.
+         * @param layout The output channels layout.
+         * @param sampleRate The output sample rate in Hz.
+         */
+        UnreadData(AVSampleFormat format, LayoutMask layout, int sampleRate);
 
         /**
          * Get the internal frame.
@@ -185,11 +214,11 @@ private:
      *
      * @param buffer The buffer where the data will be written to.
      * @param size The buffer size in bytes.
-     * @param wordsRead The number of words that has been read already. This is used to calculate the write offset and
+     * @param bytesRead The number of bytes that has been read already. This is used to calculate the write offset and
      * the amount of data that can still be written to the buffer.
-     * @return The number of words copied to @c buffer.
+     * @return The number of bytes copied to @c buffer.
      */
-    size_t readData(int16_t* buffer, size_t size, size_t wordsRead);
+    size_t readData(Byte* buffer, size_t size, size_t bytesRead);
 
     /**
      * Call the resampler for the given input frame. This method will fill @c m_unreadData with the resampled data.
@@ -222,6 +251,13 @@ private:
     void initialize();
 
     /**
+     * Initialize the decoder audio filters.
+     *
+     * If there is an unrecoverable error, it will return false and set the decoder to @c INVALID state.
+     */
+    bool initializeFilters();
+
+    /**
      * Parse the status returned by an FFmpeg function.
      *
      * - If there was a unrecoverable error, set the decoder state to @c INVALID.
@@ -241,6 +277,15 @@ private:
     /// A controller for the input data.
     std::unique_ptr<FFmpegInputControllerInterface> m_inputController;
 
+    /// The output sample format.
+    const AVSampleFormat m_outputFormat;
+
+    /// The output channel layout.
+    const LayoutMask m_outputLayout;
+
+    /// The output sample rate.
+    const int m_outputRate;
+
     /// Input format context object.
     std::shared_ptr<AVFormatContext> m_formatContext;
 
@@ -249,6 +294,15 @@ private:
 
     /// Pointer to the resample context.
     std::shared_ptr<SwrContext> m_swrContext;
+
+    /// Pointer to the filter graph context. Used when alarm volume ramp is enabled.
+    std::shared_ptr<AVFilterGraph> m_filterGraph;
+
+    /// Pointers to the input and output filters of the filter context.
+    /// The filter graph context owns these, the shared_ptrs are initialized
+    /// with a noop deleter.
+    std::shared_ptr<AVFilterContext> m_filterInput;
+    std::shared_ptr<AVFilterContext> m_filterOutput;
 
     /// Object that keeps the unread data leftover from the last @c read.
     UnreadData m_unreadData;
@@ -261,6 +315,12 @@ private:
 
     /// Time when the initialize method started. This is used to abort initialization that might be taking too long.
     std::chrono::time_point<std::chrono::steady_clock> m_initializeStartTime;
+
+    /// The source config (for fade in)
+    avsCommon::utils::mediaPlayer::SourceConfig m_sourceConfig;
+
+    /// The sum total of audio sample duration decoded, in milliseconds
+    long long m_decodedSampleTime = 0;
 };
 
 }  // namespace android

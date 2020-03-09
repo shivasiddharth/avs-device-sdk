@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * Copyright 2017-2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License").
  * You may not use this file except in compliance with the License.
@@ -23,9 +23,10 @@
 
 #include "ConsolePrinter.h"
 #include "ConsoleReader.h"
+#include "DefaultClient/EqualizerRuntimeSetup.h"
+#include "SampleApp/GuiRenderer.h"
 #include "SampleApplicationReturnCodes.h"
 #include "UserInputManager.h"
-#include "SampleApp/GuiRenderer.h"
 
 #ifdef KWD
 #include <KWD/AbstractKeywordDetector.h>
@@ -37,8 +38,13 @@
 #include <AndroidSLESMediaPlayer/AndroidSLESMediaPlayer.h>
 #endif
 
+#ifdef BLUETOOTH_BLUEZ_PULSEAUDIO_OVERRIDE_ENDPOINTS
+#include <BlueZ/PulseAudioBluetoothInitializer.h>
+#endif
+
 #include <CapabilitiesDelegate/CapabilitiesDelegate.h>
 #include <ExternalMediaPlayer/ExternalMediaPlayer.h>
+#include <AVSCommon/Utils/MediaPlayer/PooledMediaPlayerFactory.h>
 
 namespace alexaClientSDK {
 namespace sampleApp {
@@ -82,11 +88,13 @@ public:
      * Method to create mediaPlayers for the optional music provider adapters plugged into the SDK.
      *
      * @param httpContentFetcherFactory The HTTPContentFetcherFactory to be used while creating the mediaPlayers.
+     * @param equalizerRuntimeSetup Equalizer runtime setup to register equalizers
      * @param additionalSpeakers The speakerInterface to add the created mediaPlayer.
      * @return @c true if the mediaPlayer of all the registered adapters could be created @c false otherwise.
      */
     bool createMediaPlayersForAdapters(
         std::shared_ptr<avsCommon::utils::libcurlUtils::HTTPContentFetcherFactory> httpContentFetcherFactory,
+        std::shared_ptr<defaultClient::EqualizerRuntimeSetup> equalizerRuntimeSetup,
         std::vector<std::shared_ptr<avsCommon::sdkInterfaces::SpeakerInterface>>& additionalSpeakers);
 
     /**
@@ -107,19 +115,6 @@ public:
     };
 
     /**
-     * Signature of functions to create a MediaPlayer.
-     *
-     * @param httpContentFetcherFactory The HTTPContentFetcherFactory to be used while creating the mediaPlayers.
-     * @param type The type of the SpeakerInterface.
-     * @param name The name of the MediaPlayer instance.
-     * @return Return shared pointer to the created MediaPlayer instance.
-     */
-    using MediaPlayerCreateFunction = std::shared_ptr<ApplicationMediaPlayer> (*)(
-        std::shared_ptr<avsCommon::sdkInterfaces::HTTPContentFetcherInterfaceFactoryInterface> contentFetcherFactory,
-        avsCommon::sdkInterfaces::SpeakerInterface::Type type,
-        std::string name);
-
-    /**
      * Instances of this class register MediaPlayers to be created. Each third-party adapter registers a mediaPlayer
      * for itself by instantiating a static instance of the below class supplying their business name, speaker interface
      * type and creator method.
@@ -130,13 +125,11 @@ public:
          * Register a @c MediaPlayer for use by a music provider adapter.
          *
          * @param playerId The @c playerId identifying the @c ExternalMediaAdapter to register.
-         * @speakerType The SpeakerType of the mediaPlayer to be created.
-         * @param createFunction The function to use to create instances of the mediaPlayer to use for the player.
+         * @param speakerType The SpeakerType of the mediaPlayer to be created.
          */
         MediaPlayerRegistration(
             const std::string& playerId,
-            avsCommon::sdkInterfaces::SpeakerInterface::Type speakerType,
-            MediaPlayerCreateFunction createFunction);
+            avsCommon::sdkInterfaces::SpeakerInterface::Type speakerType);
     };
 
 private:
@@ -160,16 +153,20 @@ private:
      * Create an application media player.
      *
      * @param contentFetcherFactory Used to create objects that can fetch remote HTTP content.
+     * @param enableEqualizer Flag indicating if equalizer should be enabled for this media player.
      * @param type The type used to categorize the speaker for volume control.
      * @param name The media player instance name used for logging purpose.
+     * @param enableLiveMode Flag, indicating if the player is in live mode.
      * @return A pointer to the @c ApplicationMediaPlayer and to its speaker if it succeeds; otherwise, return @c
      * nullptr.
      */
     std::pair<std::shared_ptr<ApplicationMediaPlayer>, std::shared_ptr<avsCommon::sdkInterfaces::SpeakerInterface>>
     createApplicationMediaPlayer(
         std::shared_ptr<avsCommon::utils::libcurlUtils::HTTPContentFetcherFactory> httpContentFetcherFactory,
+        bool enableEqualizer,
         avsCommon::sdkInterfaces::SpeakerInterface::Type type,
-        const std::string& name);
+        const std::string& name,
+        bool enableLiveMode = false);
 
     /// The @c InteractionManager which perform user requests.
     std::shared_ptr<InteractionManager> m_interactionManager;
@@ -194,8 +191,8 @@ private:
     /// The @c MediaPlayer used by @c SpeechSynthesizer.
     std::shared_ptr<ApplicationMediaPlayer> m_speakMediaPlayer;
 
-    /// The @c MediaPlayer used by @c AudioPlayer.
-    std::shared_ptr<ApplicationMediaPlayer> m_audioMediaPlayer;
+    /// The Pool of @c MediaPlayers used by @c AudioPlayer (via @c PooledMediaPlayerFactory)
+    std::vector<std::shared_ptr<ApplicationMediaPlayer>> m_audioMediaPlayerPool;
 
     /// The @c MediaPlayer used by @c Alerts.
     std::shared_ptr<ApplicationMediaPlayer> m_alertsMediaPlayer;
@@ -206,17 +203,27 @@ private:
     /// The @c MediaPlayer used by @c Bluetooth.
     std::shared_ptr<ApplicationMediaPlayer> m_bluetoothMediaPlayer;
 
+    /// The @c MediaPlayer used by @c SystemSoundPlayer.
+    std::shared_ptr<ApplicationMediaPlayer> m_systemSoundMediaPlayer;
+
+#ifdef ENABLE_COMMS_AUDIO_PROXY
+    /// The @c MediaPlayer used by @c Comms.
+    std::shared_ptr<ApplicationMediaPlayer> m_commsMediaPlayer;
+#endif
+
+#ifdef ENABLE_PCC
+    /// The @c MediaPlayer used by PhoneCallController.
+    std::shared_ptr<ApplicationMediaPlayer> m_phoneMediaPlayer;
+#endif
+
     /// The @c CapabilitiesDelegate used by the client.
     std::shared_ptr<alexaClientSDK::capabilitiesDelegate::CapabilitiesDelegate> m_capabilitiesDelegate;
 
     /// The @c MediaPlayer used by @c NotificationsCapabilityAgent.
     std::shared_ptr<ApplicationMediaPlayer> m_ringtoneMediaPlayer;
 
-    using SpeakerTypeAndCreateFunc =
-        std::pair<avsCommon::sdkInterfaces::SpeakerInterface::Type, MediaPlayerCreateFunction>;
-
-    /// The singleton map from @c playerId to @c MediaPlayerCreateFunction.
-    static std::unordered_map<std::string, SpeakerTypeAndCreateFunc> m_playerToMediaPlayerMap;
+    /// The singleton map from @c playerId to @c SpeakerInterface::Type.
+    static std::unordered_map<std::string, avsCommon::sdkInterfaces::SpeakerInterface::Type> m_playerToSpeakerTypeMap;
 
     /// The singleton map from @c playerId to @c ExternalMediaAdapter creation functions.
     static capabilityAgents::externalMediaPlayer::ExternalMediaPlayer::AdapterCreationMap m_adapterToCreateFuncMap;
@@ -229,6 +236,11 @@ private:
 #if defined(ANDROID_MEDIA_PLAYER) || defined(ANDROID_MICROPHONE)
     /// The android OpenSL ES engine used to create media players and microphone.
     std::shared_ptr<applicationUtilities::androidUtilities::AndroidSLESEngine> m_openSlEngine;
+#endif
+
+#ifdef BLUETOOTH_BLUEZ_PULSEAUDIO_OVERRIDE_ENDPOINTS
+    /// Iniitalizer object to reload PulseAudio Bluetooth modules.
+    std::shared_ptr<bluetoothImplementations::blueZ::PulseAudioBluetoothInitializer> m_pulseAudioInitializer;
 #endif
 };
 
