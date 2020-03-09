@@ -469,6 +469,11 @@ bool SampleApplication::initialize(
      */
     auto userInterfaceManager = std::make_shared<alexaClientSDK::sampleApp::UIManager>();
 
+    if (!userInterfaceManager->initDbus()) {
+        alexaClientSDK::sampleApp::ConsolePrinter::simplePrint("Failed to initialize D-Bus for UIManager!");
+        return false;
+    }
+
     /*
      * Creating customerDataManager which will be used by the registrationManager and all classes that extend
      * CustomerDataHandler

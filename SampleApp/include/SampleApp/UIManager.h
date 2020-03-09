@@ -16,6 +16,8 @@
 #ifndef ALEXA_CLIENT_SDK_SAMPLEAPP_INCLUDE_SAMPLEAPP_UIMANAGER_H_
 #define ALEXA_CLIENT_SDK_SAMPLEAPP_INCLUDE_SAMPLEAPP_UIMANAGER_H_
 
+#include <dbus/dbus.h>
+
 #include <AVSCommon/SDKInterfaces/AuthObserverInterface.h>
 #include <AVSCommon/SDKInterfaces/CapabilitiesObserverInterface.h>
 #include <AVSCommon/SDKInterfaces/DialogUXStateObserverInterface.h>
@@ -48,6 +50,7 @@ public:
     /**
      * Constructor.
      */
+    bool initDbus();
     UIManager();
 
     void onDialogUXStateChanged(DialogUXState state) override;
@@ -186,6 +189,8 @@ private:
      */
     void printState();
 
+    void sendDbusSignal(const std::string signalName);
+
     /**
      * Sets the failure status. If status is new and not empty, we'll print the limited mode help.
      *
@@ -214,6 +219,8 @@ private:
 
     /// An internal executor that performs execution of callable objects passed to it sequentially but asynchronously.
     avsCommon::utils::threading::Executor m_executor;
+
+    DBusConnection *m_dbus_conn;
 
     // String that holds a failure status message to be displayed when we are in limited mode.
     std::string m_failureStatus;
