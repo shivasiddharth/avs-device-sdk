@@ -16,6 +16,8 @@
 #ifndef ALEXA_CLIENT_SDK_SAMPLEAPP_INCLUDE_SAMPLEAPP_UIMANAGER_H_
 #define ALEXA_CLIENT_SDK_SAMPLEAPP_INCLUDE_SAMPLEAPP_UIMANAGER_H_
 
+
+#include <dbus/dbus.h>
 #include <Alerts/AlertObserverInterface.h>
 #include <AVSCommon/SDKInterfaces/AuthObserverInterface.h>
 #include <AVSCommon/SDKInterfaces/CapabilitiesObserverInterface.h>
@@ -59,7 +61,10 @@ public:
      *
      * @param localeAssetsManager The @c LocaleAssetsManagerInterface that provides the supported locales.
      */
+
+    bool initDbus();
     UIManager(std::shared_ptr<avsCommon::sdkInterfaces::LocaleAssetsManagerInterface> localeAssetsManager);
+
 
     void onDialogUXStateChanged(DialogUXState state) override;
 
@@ -326,6 +331,8 @@ private:
      */
     void printState();
 
+    void sendDbusSignal(const std::string signalName);
+
     /**
      * Callback function triggered when there is a notification available regarding a boolean setting.
      *
@@ -390,6 +397,8 @@ private:
 
     /// An internal executor that performs execution of callable objects passed to it sequentially but asynchronously.
     avsCommon::utils::threading::Executor m_executor;
+
+    DBusConnection *m_dbus_conn;
 
     // String that holds a failure status message to be displayed when we are in limited mode.
     std::string m_failureStatus;

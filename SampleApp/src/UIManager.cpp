@@ -18,6 +18,8 @@
 
 #include "SampleApp/UIManager.h"
 
+#include <AVSCommon/Utils/Logger/Logger.h>
+
 #include <AVSCommon/SDKInterfaces/DialogUXStateObserverInterface.h>
 #include <AVSCommon/Utils/Logger/Logger.h>
 #include <AVSCommon/Utils/JSON/JSONUtils.h>
@@ -45,6 +47,15 @@ namespace sampleApp {
 using namespace avsCommon::sdkInterfaces;
 using namespace avsCommon::utils;
 using namespace settings;
+
+static const std::string TAG("UIManager");
+
+/**
+ * Create a LogEntry using this file's TAG and the specified event string.
+ *
+ * @param The event string for this @c LogEntry.
+ */
+#define LX(event) alexaClientSDK::avsCommon::utils::logger::LogEntry(TAG, event)
 
 static const std::string VERSION = avsCommon::utils::sdkVersion::getCurrentVersion();
 
@@ -520,6 +531,27 @@ static const std::string DTMF_MESSAGE =
     "|                                                                            |\n"
     "+----------------------------------------------------------------------------+\n";
 
+bool UIManager::initDbus()
+    {
+        DBusError dbus_err;
+        // initialise the errors
+        dbus_error_init(&dbus_err);
+        // connect to the bus and check for errors
+        m_dbus_conn = dbus_bus_get(DBUS_BUS_SYSTEM, &dbus_err);
+        if (dbus_error_is_set(&dbus_err)) {
+            ACSDK_ERROR(LX("initFailed")
+                        .d("reason", "getDBusConnectionFailed")
+                        .d("detail reason", dbus_err.message));
+            dbus_error_free(&dbus_err);
+        }
+        if (!m_dbus_conn) {
+            ACSDK_ERROR(LX("initFailed").d("reason", "getDBusConnectionFailed-1"));
+            return false;
+        }
+
+        return true;
+}
+
 void UIManager::onDialogUXStateChanged(DialogUXState state) {
     m_executor.submit([this, state]() {
         if (state == m_dialogState) {
@@ -527,6 +559,17 @@ void UIManager::onDialogUXStateChanged(DialogUXState state) {
         }
         m_dialogState = state;
         printState();
+
+        if (m_dialogState == DialogUXState::IDLE) {
+            sendDbusSignal("on_idle");
+        } else if (m_dialogState == DialogUXState::LISTENING) {
+            sendDbusSignal("on_listen");
+        } else if (m_dialogState == DialogUXState::THINKING) {
+            sendDbusSignal("on_think");
+        } else if (m_dialogState == DialogUXState::SPEAKING) {
+            sendDbusSignal("on_speak");
+        }
+
     });
 }
 
@@ -537,6 +580,14 @@ void UIManager::onConnectionStatusChanged(const Status status, const ChangedReas
         }
         m_connectionStatus = status;
         printState();
+
+        if (m_connectionStatus == avsCommon::sdkInterfaces::ConnectionStatusObserverInterface::Status::DISCONNECTED ||
+            m_connectionStatus == avsCommon::sdkInterfaces::ConnectionStatusObserverInterface::Status::PENDING) {
+            sendDbusSignal("connecting");
+        } else if (m_connectionStatus == avsCommon::sdkInterfaces::ConnectionStatusObserverInterface::Status::CONNECTED) {
+            sendDbusSignal("ready");
+        }
+
     });
 }
 
@@ -938,6 +989,36 @@ void UIManager::printState() {
                 return;
         }
     }
+}
+
+
+void UIManager::sendDbusSignal(const std::string signalName)
+{
+    DBusMessage *msg;
+    //DBusMessageIter args;
+    dbus_uint32_t serial = 0;
+
+    ACSDK_LOG(alexaClientSDK::avsCommon::utils::logger::Level::INFO, LX("DBusSignal").d("signalName", signalName));
+
+    // create a signal & check for errors
+    msg = dbus_message_new_signal("/io/respeaker/respeakerd", // object name of the signal
+                                  "respeakerd.signal", // interface name of the signal
+                                  signalName.c_str()); // name of the signal
+    if (!msg) {
+        ACSDK_ERROR(LX("DBusFailed").d("reason", "create message failed"));
+        return;
+    }
+
+    // send the message and flush the connection
+    if (!dbus_connection_send(m_dbus_conn, msg, &serial)) {
+        ACSDK_ERROR(LX("DBusFailed").d("reason", "send message failed"));
+        return;
+    }
+
+    dbus_connection_flush(m_dbus_conn);
+
+    // free the message
+    dbus_message_unref(msg);
 }
 
 void UIManager::printCommsNotSupported() {

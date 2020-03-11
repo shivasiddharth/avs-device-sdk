@@ -42,6 +42,9 @@ include(PortAudio)
 # Setup Test Options variables.
 include(TestOptions)
 
+find_package(PkgConfig)
+pkg_check_modules(DBUS REQUIRED dbus-1)
+
 # Setup Bluetooth variables.
 include(Bluetooth)
 

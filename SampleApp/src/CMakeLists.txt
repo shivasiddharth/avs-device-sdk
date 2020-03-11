@@ -1,3 +1,4 @@
+
 set(LibSampleApp_SOURCES)
 list(APPEND LibSampleApp_SOURCES
     CaptionPresenter.cpp
@@ -59,12 +60,14 @@ ENDIF()
 
 add_library(LibSampleApp SHARED ${LibSampleApp_SOURCES})
 
+
 target_include_directories(LibSampleApp PUBLIC
     # This is relative to project(SampleApp).
     "${SampleApp_SOURCE_DIR}/include"
     "${AudioResources_SOURCE_DIR}/include"
     "${RegistrationManager_SOURCE_DIR}/include"
     "${ESP_SOURCE_DIR}/include"
+    "${DBUS_INCLUDE_DIRS}"
     "${InterruptModel_SOURCE_DIR}/config"
     "${PORTAUDIO_INCLUDE_DIR}")
 
@@ -74,10 +77,12 @@ target_link_libraries(LibSampleApp
     CapabilitiesDelegate
     CBLAuthDelegate
     SQLiteStorage
+    "${DBUS_LIBRARIES}"
     SynchronizeStateSender
     EqualizerImplementations
     InterruptModel
     "${PORTAUDIO_LIB_PATH}")
+
 
 if (PCC)
     target_link_libraries(LibSampleApp AVSCommon)
