@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * Copyright 2018-2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License").
  * You may not use this file except in compliance with the License.
@@ -15,19 +15,26 @@
 #ifndef ALEXA_CLIENT_SDK_MEDIAPLAYER_ANDROIDSLESMEDIAPLAYER_INCLUDE_ANDROIDSLESMEDIAPLAYER_ANDROIDSLESMEDIAPLAYER_H_
 #define ALEXA_CLIENT_SDK_MEDIAPLAYER_ANDROIDSLESMEDIAPLAYER_INCLUDE_ANDROIDSLESMEDIAPLAYER_ANDROIDSLESMEDIAPLAYER_H_
 
+#include <unordered_set>
+#include <vector>
+
 #include <SLES/OpenSLES.h>
 
+#include <AndroidUtilities/AndroidSLESEngine.h>
+#include <AndroidUtilities/AndroidSLESObject.h>
+#include <AVSCommon/SDKInterfaces/Audio/EqualizerInterface.h>
 #include <AVSCommon/SDKInterfaces/HTTPContentFetcherInterfaceFactoryInterface.h>
 #include <AVSCommon/SDKInterfaces/SpeakerInterface.h>
 #include <AVSCommon/Utils/MediaPlayer/MediaPlayerInterface.h>
+#include <AVSCommon/Utils/MediaPlayer/SourceConfig.h>
 #include <AVSCommon/Utils/PlaylistParser/IterativePlaylistParserInterface.h>
 #include <AVSCommon/Utils/RequiresShutdown.h>
-#include <AndroidUtilities/AndroidSLESEngine.h>
-#include <AndroidUtilities/AndroidSLESObject.h>
+#include <EqualizerImplementations/EqualizerBandMapperInterface.h>
 #include <PlaylistParser/UrlContentToAttachmentConverter.h>
 
 #include "AndroidSLESMediaPlayer/AndroidSLESMediaQueue.h"
 #include "AndroidSLESMediaPlayer/FFmpegDecoder.h"
+#include "AndroidSLESMediaPlayer/PlaybackConfiguration.h"
 
 namespace alexaClientSDK {
 namespace mediaPlayer {
@@ -40,6 +47,7 @@ namespace android {
  */
 class AndroidSLESMediaPlayer
         : public avsCommon::utils::mediaPlayer::MediaPlayerInterface
+        , public avsCommon::sdkInterfaces::audio::EqualizerInterface
         , public avsCommon::utils::RequiresShutdown {
 public:
     /**
@@ -48,6 +56,7 @@ public:
      * @param contentFetcherFactory Used to create objects that can fetch remote HTTP content.
      * @param engine The OpenSL ES engine that is used to access the OpenSL ES media player and output mixer.
      * @param type The type used to categorize the media player speaker for volume control.
+     * @param config The playback configuration.
      * @param name The instance name used for logging purpose.
      * @return An instance of the @c AndroidSLESMediaPlayer if successful else @c nullptr.
      */
@@ -55,22 +64,47 @@ public:
         std::shared_ptr<avsCommon::sdkInterfaces::HTTPContentFetcherInterfaceFactoryInterface> contentFetcherFactory,
         std::shared_ptr<applicationUtilities::androidUtilities::AndroidSLESEngine> engine,
         avsCommon::sdkInterfaces::SpeakerInterface::Type type,
-        const std::string& name);
+        bool enableEqualizer,
+        const PlaybackConfiguration& config = PlaybackConfiguration(),
+        const std::string& name = "AndroidMediaPlayer");
+
+    /// @name EqualizerInterface methods.
+    ///@{
+    void setEqualizerBandLevels(avsCommon::sdkInterfaces::audio::EqualizerBandLevelMap bandLevelMap) override;
+
+    int getMinimumBandLevel() override;
+
+    int getMaximumBandLevel() override;
+    ///}@
 
     /// @name MediaPlayerInterface methods.
     ///@{
     SourceId setSource(
         std::shared_ptr<avsCommon::avs::attachment::AttachmentReader> attachmentReader,
-        const avsCommon::utils::AudioFormat* format) override;
-    SourceId setSource(const std::string& url, std::chrono::milliseconds offset) override;
-    SourceId setSource(std::shared_ptr<std::istream> stream, bool repeat) override;
+        const avsCommon::utils::AudioFormat* format = nullptr,
+        const avsCommon::utils::mediaPlayer::SourceConfig& config =
+            avsCommon::utils::mediaPlayer::emptySourceConfig()) override;
+    SourceId setSource(
+        const std::string& url,
+        std::chrono::milliseconds offset,
+        const avsCommon::utils::mediaPlayer::SourceConfig& config = avsCommon::utils::mediaPlayer::emptySourceConfig(),
+        bool repeat = false) override;
+    SourceId setSource(
+        std::shared_ptr<std::istream> stream,
+        bool repeat,
+        const avsCommon::utils::mediaPlayer::SourceConfig& config =
+            avsCommon::utils::mediaPlayer::emptySourceConfig()) override;
     bool play(SourceId id) override;
     bool stop(SourceId id) override;
     bool pause(SourceId id) override;
     bool resume(SourceId id) override;
     std::chrono::milliseconds getOffset(SourceId id) override;
     uint64_t getNumBytesBuffered() override;
-    void setObserver(
+    avsCommon::utils::Optional<avsCommon::utils::mediaPlayer::MediaPlayerState> getMediaPlayerState(
+        SourceId id) override;
+    void addObserver(
+        std::shared_ptr<avsCommon::utils::mediaPlayer::MediaPlayerObserverInterface> playerObserver) override;
+    void removeObserver(
         std::shared_ptr<avsCommon::utils::mediaPlayer::MediaPlayerObserverInterface> playerObserver) override;
     ///@}
 
@@ -108,7 +142,10 @@ private:
      * @param engine The OpenSL ES engine that is used to access the OpenSL ES media player and output mixer.
      * @param outputMixObject The output mix object used to control the media player volume.
      * @param playerObject The media player object used to play audio.
+     * @param equalizer The equalizer object used to control the media player volume. Could be nullptr if equalizer is
+     * not required for this instance.
      * @param playerInterface The interface object used to access the media player functions of the player object.
+     * @param config The playback configuration used to setup the android media player.
      * @param name String used to identify the @c AndroidSLESMediaPlayer instance.
      */
     AndroidSLESMediaPlayer(
@@ -117,7 +154,9 @@ private:
         std::shared_ptr<applicationUtilities::androidUtilities::AndroidSLESEngine> engine,
         std::shared_ptr<applicationUtilities::androidUtilities::AndroidSLESObject> outputMixObject,
         std::shared_ptr<applicationUtilities::androidUtilities::AndroidSLESObject> playerObject,
+        SLEqualizerItf equalizer,
         SLPlayItf playerInterface,
+        const PlaybackConfiguration& config,
         const std::string& name);
 
     /**
@@ -142,14 +181,15 @@ private:
     /**
      * Internal method used to create a new media queue and increment the request id.
      *
-     * @param decoder A pointer to a valid decoder object that is used to decode the input into raw format.
+     * @param inputController A pointer to a valid decoder object that is used to decode the input into raw format.
      * @param playlistParser Optional pointer to the new playlist parser.
      * @param offset The initial playback position.This is used to compute the overall media position during playback.
      * @return The @c SourceId that represents the source being handled as a result of this call. @c ERROR will be
      * returned if the source failed to be set.
      */
     SourceId configureNewRequest(
-        std::unique_ptr<FFmpegDecoder> decoder,
+        std::unique_ptr<FFmpegInputControllerInterface> inputController,
+        const avsCommon::utils::mediaPlayer::SourceConfig& config = avsCommon::utils::mediaPlayer::emptySourceConfig(),
         std::shared_ptr<avsCommon::utils::playlistParser::IterativePlaylistParserInterface> playlistParser = nullptr,
         std::chrono::milliseconds offset = std::chrono::milliseconds(0));
 
@@ -159,6 +199,21 @@ private:
      * @return @c true if the call succeeded, in which case a callback will be made, or @c false otherwise.
      */
     bool stopLocked();
+
+    /**
+     * Initializes equalizer
+     *
+     * @return True if initialization succeeded, false otherwise.
+     */
+    bool initializeEqualizer();
+
+    /**
+     * Implements the getOffset logic. This method should only be called after acquiring @c m_mutex.
+     *
+     * @param @c SourceId of which to get the offset
+     * @return Offset in milliseconds for the given @c SourceId
+     */
+    std::chrono::milliseconds getOffsetLocked(SourceId id);
 
     /**
      * Convert the buffer size to media playback duration based on the raw audio settings.
@@ -174,6 +229,14 @@ private:
      * @return The media playback length represented by the given size.
      */
     static std::chrono::milliseconds computeDuration(size_t sizeBytes);
+
+    /**
+     * Create a media player state for the given SourceId
+     *
+     * @param id Source id
+     * @return Media player state metadata
+     */
+    avsCommon::utils::mediaPlayer::MediaPlayerState createMediaPlayerState(SourceId id);
 
     /// Mutex used to synchronize @c request creation.
     std::mutex m_requestMutex;
@@ -203,11 +266,32 @@ private:
     /// The media player OpenSL ES object.
     std::shared_ptr<applicationUtilities::androidUtilities::AndroidSLESObject> m_playerObject;
 
-    /// The media player observer which can be nullptr.
-    std::shared_ptr<avsCommon::utils::mediaPlayer::MediaPlayerObserverInterface> m_observer;
+    /// The media player observers.
+    std::unordered_set<std::shared_ptr<avsCommon::utils::mediaPlayer::MediaPlayerObserverInterface>> m_observers;
+
+    /// Equalizer OpenSL ES interface.
+    SLEqualizerItf m_equalizer;
+
+    /// OpenSL ES equalizer bands sorted by frequency in ascending order.
+    std::vector<int> m_growingFrequenceBandMap;
+
+    /// Equalizer band mapper to map AVS bands into OpenSL ES bands.
+    std::shared_ptr<equalizer::EqualizerBandMapperInterface> m_bandMapper;
+
+    /// Number of equalizer bands supported by the device.
+    int m_numberOfEqualizerBands;
+
+    /// Minimum band level supported by equalizer
+    int m_minBandLevel;
+
+    /// Maximum band level supported by equalizer
+    int m_maxBandLevel;
 
     /// The media player OpenSL ES interface.
     SLPlayItf m_player;
+
+    // The android media player configuration.
+    PlaybackConfiguration m_config;
 
     /// The OpenSL ES interface to get the prefetch status information. This interface is optional and the media player
     /// should be functional without the prefetch information.

@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * Copyright 2017-2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License").
  * You may not use this file except in compliance with the License.
@@ -23,7 +23,6 @@
 #include "AVSCommon/Utils/Threading/Executor.h"
 #include "AVSCommon/Utils/RequiresShutdown.h"
 #include "AVSCommon/AVS/MessageRequest.h"
-// TODO: ACSDK-421: Revert this to implement send().
 #include "AVSCommon/SDKInterfaces/MessageSenderInterface.h"
 
 #include "ACL/Transport/MessageRouterObserverInterface.h"
@@ -38,7 +37,6 @@ namespace acl {
  *
  * Implementations of this class are required to be thread-safe.
  */
-// TODO: ACSDK-421: Remove the inheritance from MessageSenderInterface.
 class MessageRouterInterface
         : public avsCommon::sdkInterfaces::MessageSenderInterface
         , public avsCommon::utils::RequiresShutdown {
@@ -76,11 +74,18 @@ public:
     virtual ConnectionStatus getConnectionStatus() = 0;
 
     /**
-     * Set the URL endpoint for the AVS connection.  Calling this function with a new value will cause the
-     * current active connection to be closed, and a new one opened to the new endpoint.
-     * @param avsEndpoint The URL for the new AVS endpoint.
+     * Set the gateway URL for the AVS connection.  Calling this function with a new value will cause the
+     * current active connection to be closed, and a new one opened to the new gateway.
+     * @param avsGateway The URL for the new AVS gateway.
      */
-    virtual void setAVSEndpoint(const std::string& avsEndpoint) = 0;
+    virtual void setAVSGateway(const std::string& avsGateway) = 0;
+
+    /**
+     * Get the gateway URL for the AVS connection.
+     *
+     * @return The URL for the current AVS gateway.
+     */
+    virtual std::string getAVSGateway() = 0;
 
     /**
      * Set the observer to this object.

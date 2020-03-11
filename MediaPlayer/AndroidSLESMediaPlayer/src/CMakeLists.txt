@@ -7,7 +7,8 @@ add_library(AndroidSLESMediaPlayer SHARED
         FFmpegDecoder.cpp
         FFmpegDeleter.cpp
         FFmpegStreamInputController.cpp
-        FFmpegUrlInputController.cpp)
+        FFmpegUrlInputController.cpp
+        PlaybackConfiguration.cpp)
 
 target_include_directories(AndroidSLESMediaPlayer PUBLIC
         ${AndroidSLESMediaPlayer_SOURCE_DIR}/include
@@ -20,10 +21,12 @@ target_link_libraries(AndroidSLESMediaPlayer
         AVSCommon
         PlaylistParser
         OpenSLES
+        EqualizerImplementations
         # FFmpeg libraries
         avcodec
         avutil
         avformat
+        avfilter
         swresample)
 
 # install target

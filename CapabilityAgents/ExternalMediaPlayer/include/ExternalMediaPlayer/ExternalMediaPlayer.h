@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * Copyright 2017-2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License").
  * You may not use this file except in compliance with the License.
@@ -18,17 +18,21 @@
 
 #include <map>
 #include <memory>
+#include <mutex>
 #include <string>
 
 #include <AVSCommon/AVS/CapabilityAgent.h>
 #include <AVSCommon/AVS/DirectiveHandlerConfiguration.h>
+#include <AVSCommon/SDKInterfaces/CapabilityConfigurationInterface.h>
 #include <AVSCommon/SDKInterfaces/ContextManagerInterface.h>
 #include <AVSCommon/SDKInterfaces/ExternalMediaAdapterInterface.h>
 #include <AVSCommon/SDKInterfaces/ExternalMediaPlayerInterface.h>
+#include <AVSCommon/SDKInterfaces/ExternalMediaPlayerObserverInterface.h>
 #include <AVSCommon/SDKInterfaces/FocusManagerInterface.h>
 #include <AVSCommon/SDKInterfaces/MessageSenderInterface.h>
 #include <AVSCommon/SDKInterfaces/PlaybackHandlerInterface.h>
 #include <AVSCommon/SDKInterfaces/PlaybackRouterInterface.h>
+#include <AVSCommon/SDKInterfaces/RenderPlayerInfoCardsProviderInterface.h>
 #include <AVSCommon/SDKInterfaces/SpeakerManagerInterface.h>
 #include <AVSCommon/AVS/NamespaceAndName.h>
 #include <AVSCommon/Utils/MediaPlayer/MediaPlayerInterface.h>
@@ -48,7 +52,10 @@ namespace externalMediaPlayer {
 class ExternalMediaPlayer
         : public avsCommon::avs::CapabilityAgent
         , public avsCommon::utils::RequiresShutdown
+        , public avsCommon::sdkInterfaces::CapabilityConfigurationInterface
         , public avsCommon::sdkInterfaces::ExternalMediaPlayerInterface
+        , public avsCommon::sdkInterfaces::MediaPropertiesInterface
+        , public avsCommon::sdkInterfaces::RenderPlayerInfoCardsProviderInterface
         , public avsCommon::sdkInterfaces::PlaybackHandlerInterface
         , public std::enable_shared_from_this<ExternalMediaPlayer> {
 public:
@@ -128,6 +135,40 @@ public:
     /// @{
     virtual void setPlayerInFocus(const std::string& playerInFocus) override;
     /// @}
+
+    /// @name CapabilityConfigurationInterface Functions
+    /// @{
+    std::unordered_set<std::shared_ptr<avsCommon::avs::CapabilityConfiguration>> getCapabilityConfigurations() override;
+    /// @}
+
+    /// @name RenderPlayerInfoCardsProviderInterface Functions
+    /// @{
+    void setObserver(
+        std::shared_ptr<avsCommon::sdkInterfaces::RenderPlayerInfoCardsObserverInterface> observer) override;
+    /// @}
+
+    /// @name MediaPropertiesInterface Functions
+    /// @{
+    std::chrono::milliseconds getAudioItemOffset() override;
+    /// @}
+
+    /**
+     * Adds an observer which will be notified on any observable state changes
+     *
+     * @param observer The observer to add
+     */
+    void addObserver(
+        const std::shared_ptr<avsCommon::sdkInterfaces::externalMediaPlayer::ExternalMediaPlayerObserverInterface>
+            observer);
+
+    /**
+     * Removes an observer from the list of active watchers
+     *
+     *@param observer The observer to remove
+     */
+    void removeObserver(
+        const std::shared_ptr<avsCommon::sdkInterfaces::externalMediaPlayer::ExternalMediaPlayerObserverInterface>
+            observer);
 
 private:
     /**
@@ -312,6 +353,43 @@ private:
         std::shared_ptr<DirectiveInfo> info,
         avsCommon::sdkInterfaces::externalMediaPlayer::RequestType request);
 
+    /**
+     * Calls each observer and provides the ObservableSessionProperties for this adapter
+     *
+     * @param playerId the ExternalMediaAdapter being reported on
+     * @param sessionProperties  the observable session properties being reported
+     */
+    void notifyObservers(
+        const std::string& playerId,
+        const avsCommon::sdkInterfaces::externalMediaPlayer::ObservableSessionProperties* sessionProperties);
+
+    /**
+     * Calls each observer and provides the ObservablePlaybackStateProperties for this adapter
+     *
+     * @param playerId the ExternalMediaAdapter being reported on
+     * @param playbackProperties  the observable playback state properties being reported
+     */
+    void notifyObservers(
+        const std::string& playerId,
+        const avsCommon::sdkInterfaces::externalMediaPlayer::ObservablePlaybackStateProperties* playbackProperties);
+
+    /**
+     * Calls each observer and provides the supplied ObservableProperties for this adapter
+     *
+     * @param adapter the ExternalMediaAdapter being reported on
+     * @param sessionProperties  the observable session properties being reported
+     * @param playbackProperties  the observable playback state properties being reported
+     */
+    void notifyObservers(
+        const std::string& playerId,
+        const avsCommon::sdkInterfaces::externalMediaPlayer::ObservableSessionProperties* sessionProperties,
+        const avsCommon::sdkInterfaces::externalMediaPlayer::ObservablePlaybackStateProperties* playbackProperties);
+
+    /**
+     * Calls observer and provides the supplied changes related to RenderPlayerInfoCards for the active adapter.
+     */
+    void notifyRenderPlayerInfoCardsObservers();
+
     /// The @c SpeakerManagerInterface used to change the volume when requested by @c ExternalMediaAdapterInterface.
     std::shared_ptr<avsCommon::sdkInterfaces::SpeakerManagerInterface> m_speakerManager;
 
@@ -325,8 +403,31 @@ private:
     std::map<std::string, std::shared_ptr<avsCommon::sdkInterfaces::externalMediaPlayer::ExternalMediaAdapterInterface>>
         m_adapters;
 
-    /// The id of the player which currently has focus.
+    /// The id of the player which currently has focus.  Access to @c m_playerInFocus is protected by @c
+    /// m_inFocusAdapterMutex.
+    /// TODO: ACSDK-2834 Consolidate m_playerInFocus and m_adapterInFocus.
     std::string m_playerInFocus;
+
+    /// The adapter with the @c m_playerInFocus which currently has focus.  Access to @c m_adapterInFocus is
+    // protected by @c m_inFocusAdapterMutex.
+    std::shared_ptr<avsCommon::sdkInterfaces::externalMediaPlayer::ExternalMediaAdapterInterface> m_adapterInFocus;
+
+    /// Mutex to serialize access to the @c m_playerInFocus.
+    std::mutex m_inFocusAdapterMutex;
+
+    /// Mutex to serialize access to @c m_adapters.
+    std::mutex m_adaptersMutex;
+
+    /// Mutex to serialize access to the observers.
+    std::mutex m_observersMutex;
+
+    /// The set of observers watching session and playback state
+    std::unordered_set<
+        std::shared_ptr<avsCommon::sdkInterfaces::externalMediaPlayer::ExternalMediaPlayerObserverInterface>>
+        m_observers;
+
+    /// Observer for changes related to RenderPlayerInfoCards.
+    std::shared_ptr<avsCommon::sdkInterfaces::RenderPlayerInfoCardsObserverInterface> m_renderPlayerObserver;
 
     /**
      * @c Executor which queues up operations from asynchronous API calls.
@@ -346,6 +447,9 @@ private:
         avsCommon::avs::NamespaceAndName,
         std::pair<avsCommon::sdkInterfaces::externalMediaPlayer::RequestType, ExternalMediaPlayer::DirectiveHandler>>
         m_directiveToHandlerMap;
+
+    /// Set of capability configurations that will get published using the Capabilities API
+    std::unordered_set<std::shared_ptr<avsCommon::avs::CapabilityConfiguration>> m_capabilityConfigurations;
 };
 
 }  // namespace externalMediaPlayer

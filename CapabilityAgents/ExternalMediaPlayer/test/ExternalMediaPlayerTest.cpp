@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * Copyright 2018-2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License").
  * You may not use this file except in compliance with the License.
@@ -70,7 +70,7 @@ using namespace rapidjson;
 static const unsigned int PROVIDE_STATE_TOKEN_TEST{1};
 
 /// Plenty of time for a test to complete.
-static std::chrono::milliseconds WAIT_TIMEOUT(1000);
+static std::chrono::milliseconds MY_WAIT_TIMEOUT(1000);
 
 // The namespaces used in the context.
 static const std::string EXTERNALMEDIAPLAYER_STATE_NAMESPACE = "ExternalMediaPlayer";
@@ -86,6 +86,12 @@ static const std::string PLAYLISTCONTROLLER_NAMESPACE = "Alexa.PlaylistControlle
 static const std::string SEEKCONTROLLER_NAMESPACE = "Alexa.SeekController";
 static const std::string FAVORITESCONTROLLER_NAMESPACE = "Alexa.FavoritesController";
 
+// field values used in Adapter State response
+static const std::string PLAYER_USER_NAME = "userName";
+static const std::string PLAYER_ID = "testPlayerId";
+static const std::string PLAYER_TRACK = "testTrack";
+static const std::string PLAYER_STATE = "IDLE";
+
 // The @c External media player play directive signature.
 static const NamespaceAndName PLAY_DIRECTIVE{EXTERNALMEDIAPLAYER_NAMESPACE, "Play"};
 static const NamespaceAndName LOGIN_DIRECTIVE{EXTERNALMEDIAPLAYER_NAMESPACE, "Login"};
@@ -94,6 +100,7 @@ static const NamespaceAndName LOGOUT_DIRECTIVE{EXTERNALMEDIAPLAYER_NAMESPACE, "L
 // The @c Transport control directive signatures.
 static const NamespaceAndName RESUME_DIRECTIVE{PLAYBACKCONTROLLER_NAMESPACE, "Play"};
 static const NamespaceAndName PAUSE_DIRECTIVE{PLAYBACKCONTROLLER_NAMESPACE, "Pause"};
+static const NamespaceAndName STOP_DIRECTIVE{PLAYBACKCONTROLLER_NAMESPACE, "Stop"};
 static const NamespaceAndName NEXT_DIRECTIVE{PLAYBACKCONTROLLER_NAMESPACE, "Next"};
 static const NamespaceAndName PREVIOUS_DIRECTIVE{PLAYBACKCONTROLLER_NAMESPACE, "Previous"};
 static const NamespaceAndName STARTOVER_DIRECTIVE{PLAYBACKCONTROLLER_NAMESPACE, "StartOver"};
@@ -141,7 +148,6 @@ static const std::string IDLE_PLAYBACK_STATE =
         "\"repeat\":\"NOT_REPEATED\","
         "\"favorite\":\"NOT_RATED\","
         "\"positionMilliseconds\":0,"
-        "\"uncertaintyInMilliseconds\":0,"
         "\"players\":[{"
             "\"playerId\":\"\","
             "\"state\":\"IDLE\","
@@ -172,6 +178,28 @@ static const std::string IDLE_PLAYBACK_STATE =
         "}]"
     "}";
 // clang-format on
+
+/**
+ * Method to create an adapter state struct response to getState();
+ *
+ * @return an adpater state partially filled with test values
+ */
+static AdapterState createAdapterState() {
+    AdapterSessionState sessionState;
+    sessionState.loggedIn = false;
+    sessionState.userName = PLAYER_USER_NAME;
+    sessionState.playerId = PLAYER_ID;
+
+    AdapterPlaybackState playbackState;
+    playbackState.playerId = PLAYER_ID;
+    playbackState.state = PLAYER_STATE;
+    playbackState.trackName = PLAYER_TRACK;
+
+    AdapterState adapterState;
+    adapterState.sessionState = sessionState;
+    adapterState.playbackState = playbackState;
+    return adapterState;
+}
 
 /// Message Id for testing.
 static const std::string MESSAGE_ID_TEST("MessageId_Test");
@@ -239,6 +267,7 @@ public:
     MOCK_METHOD1(handleSetVolume, void(int8_t volume));
     MOCK_METHOD1(handleSetMute, void(bool));
     MOCK_METHOD0(getState, AdapterState());
+    MOCK_METHOD0(getOffset, std::chrono::milliseconds());
 
 private:
     /// MockExternalMediaPlayerAdapter private constructor.
@@ -264,6 +293,32 @@ MockExternalMediaPlayerAdapter::getInstance(
     MockExternalMediaPlayerAdapter::m_currentActiveMediaPlayerAdapter =
         std::shared_ptr<MockExternalMediaPlayerAdapter>(new MockExternalMediaPlayerAdapter());
     return MockExternalMediaPlayerAdapter::m_currentActiveMediaPlayerAdapter;
+}
+
+class MockExternalMediaPlayerObserver : public ExternalMediaPlayerObserverInterface {
+public:
+    static std::shared_ptr<MockExternalMediaPlayerObserver> getInstance();
+    MOCK_METHOD2(
+        onLoginStateProvided,
+        void(const std::string&, const avsCommon::sdkInterfaces::externalMediaPlayer::ObservableSessionProperties));
+    MOCK_METHOD2(
+        onPlaybackStateProvided,
+        void(
+            const std::string&,
+            const avsCommon::sdkInterfaces::externalMediaPlayer::ObservablePlaybackStateProperties));
+
+private:
+    /**
+     * Constructor
+     */
+    MockExternalMediaPlayerObserver();
+};
+
+std::shared_ptr<MockExternalMediaPlayerObserver> MockExternalMediaPlayerObserver::getInstance() {
+    return std::shared_ptr<MockExternalMediaPlayerObserver>(new MockExternalMediaPlayerObserver());
+}
+
+MockExternalMediaPlayerObserver::MockExternalMediaPlayerObserver() {
 }
 
 /**
@@ -508,6 +563,13 @@ public:
      */
     SetStateResult wakeOnSetState();
 
+    /**
+     * This is is invoked to clear the promise set by a setState call for repeat testing
+     *
+     * @return @c SUCCESS.
+     */
+    SetStateResult resetWakeOnSetState();
+
     /// @c ExternalMediaPlayer to test
     std::shared_ptr<ExternalMediaPlayer> m_externalMediaPlayer;
 
@@ -583,7 +645,6 @@ void ExternalMediaPlayerTest::SetUp() {
         m_mockContextManager,
         m_mockExceptionSender,
         m_mockPlaybackRouter);
-
     m_mockDirectiveHandlerResult = std::unique_ptr<MockDirectiveHandlerResult>(new MockDirectiveHandlerResult);
     ASSERT_TRUE(m_externalMediaPlayer);
 }
@@ -601,6 +662,12 @@ SetStateResult ExternalMediaPlayerTest::wakeOnSetState() {
     return SetStateResult::SUCCESS;
 }
 
+SetStateResult ExternalMediaPlayerTest::resetWakeOnSetState() {
+    m_wakeSetStatePromise = std::promise<void>();
+    m_wakeSetStateFuture = m_wakeSetStatePromise.get_future();
+    return SetStateResult::SUCCESS;
+}
+
 void ExternalMediaPlayerTest::verifyState(const std::string& providedState, const std::string& expectedState) {
     rapidjson::Document providedStateParsed;
     providedStateParsed.Parse(providedState);
@@ -614,7 +681,7 @@ void ExternalMediaPlayerTest::verifyState(const std::string& providedState, cons
 /**
  * Test create() with nullptrs
  */
-TEST_F(ExternalMediaPlayerTest, testCreateWithNullPointers) {
+TEST_F(ExternalMediaPlayerTest, test_createWithNullPointers) {
     /// Have an empty map of adapters  and mediaPlayers
     ExternalMediaPlayer::AdapterCreationMap adapterMap;
     ExternalMediaPlayer::AdapterMediaPlayerMap adapterMediaPlayerMap;
@@ -697,7 +764,7 @@ TEST_F(ExternalMediaPlayerTest, testCreateWithNullPointers) {
  * Method to test successful creation of ExternalMediaPlayer capability agent
  * even if the creation of adapters fails.
  */
-TEST_F(ExternalMediaPlayerTest, testCreateWithAdapterCreationFailures) {
+TEST_F(ExternalMediaPlayerTest, test_createWithAdapterCreationFailures) {
     /// Have an empty map of adapters  and mediaPlayers
     ExternalMediaPlayer::AdapterCreationMap adapterMap;
     ExternalMediaPlayer::AdapterMediaPlayerMap adapterMediaPlayerMap;
@@ -739,33 +806,38 @@ TEST_F(ExternalMediaPlayerTest, testCreateWithAdapterCreationFailures) {
 /**
  * Test getConfiguration on an ExternalMediaPlayer. The operation succeeds.
  */
-TEST_F(ExternalMediaPlayerTest, testGetConfiguration) {
+TEST_F(ExternalMediaPlayerTest, test_getConfiguration) {
     auto configuration = m_externalMediaPlayer->getConfiguration();
-    ASSERT_EQ(configuration[PLAY_DIRECTIVE], BlockingPolicy::NON_BLOCKING);
-    ASSERT_EQ(configuration[LOGIN_DIRECTIVE], BlockingPolicy::NON_BLOCKING);
-    ASSERT_EQ(configuration[LOGOUT_DIRECTIVE], BlockingPolicy::NON_BLOCKING);
-    ASSERT_EQ(configuration[RESUME_DIRECTIVE], BlockingPolicy::NON_BLOCKING);
-    ASSERT_EQ(configuration[PAUSE_DIRECTIVE], BlockingPolicy::NON_BLOCKING);
-    ASSERT_EQ(configuration[NEXT_DIRECTIVE], BlockingPolicy::NON_BLOCKING);
-    ASSERT_EQ(configuration[PREVIOUS_DIRECTIVE], BlockingPolicy::NON_BLOCKING);
-    ASSERT_EQ(configuration[STARTOVER_DIRECTIVE], BlockingPolicy::NON_BLOCKING);
-    ASSERT_EQ(configuration[REWIND_DIRECTIVE], BlockingPolicy::NON_BLOCKING);
-    ASSERT_EQ(configuration[FASTFORWARD_DIRECTIVE], BlockingPolicy::NON_BLOCKING);
-    ASSERT_EQ(configuration[ENABLEREPEATONE_DIRECTIVE], BlockingPolicy::NON_BLOCKING);
-    ASSERT_EQ(configuration[ENABLEREPEAT_DIRECTIVE], BlockingPolicy::NON_BLOCKING);
-    ASSERT_EQ(configuration[DISABLEREPEAT_DIRECTIVE], BlockingPolicy::NON_BLOCKING);
-    ASSERT_EQ(configuration[ENABLESHUFFLE_DIRECTIVE], BlockingPolicy::NON_BLOCKING);
-    ASSERT_EQ(configuration[DISABLESHUFFLE_DIRECTIVE], BlockingPolicy::NON_BLOCKING);
-    ASSERT_EQ(configuration[SEEK_DIRECTIVE], BlockingPolicy::NON_BLOCKING);
-    ASSERT_EQ(configuration[ADJUSTSEEK_DIRECTIVE], BlockingPolicy::NON_BLOCKING);
-    ASSERT_EQ(configuration[FAVORITE_DIRECTIVE], BlockingPolicy::NON_BLOCKING);
-    ASSERT_EQ(configuration[UNFAVORITE_DIRECTIVE], BlockingPolicy::NON_BLOCKING);
+    auto audioNonBlockingPolicy = BlockingPolicy(BlockingPolicy::MEDIUM_AUDIO, false);
+    auto neitherNonBlockingPolicy = BlockingPolicy(BlockingPolicy::MEDIUMS_NONE, false);
+
+    // TODO: ARC-227 Verify default values
+    ASSERT_EQ(configuration[PLAY_DIRECTIVE], audioNonBlockingPolicy);
+    ASSERT_EQ(configuration[LOGIN_DIRECTIVE], neitherNonBlockingPolicy);
+    ASSERT_EQ(configuration[LOGOUT_DIRECTIVE], neitherNonBlockingPolicy);
+    ASSERT_EQ(configuration[RESUME_DIRECTIVE], audioNonBlockingPolicy);
+    ASSERT_EQ(configuration[PAUSE_DIRECTIVE], audioNonBlockingPolicy);
+    ASSERT_EQ(configuration[STOP_DIRECTIVE], audioNonBlockingPolicy);
+    ASSERT_EQ(configuration[NEXT_DIRECTIVE], audioNonBlockingPolicy);
+    ASSERT_EQ(configuration[PREVIOUS_DIRECTIVE], audioNonBlockingPolicy);
+    ASSERT_EQ(configuration[STARTOVER_DIRECTIVE], audioNonBlockingPolicy);
+    ASSERT_EQ(configuration[REWIND_DIRECTIVE], audioNonBlockingPolicy);
+    ASSERT_EQ(configuration[FASTFORWARD_DIRECTIVE], audioNonBlockingPolicy);
+    ASSERT_EQ(configuration[ENABLEREPEATONE_DIRECTIVE], neitherNonBlockingPolicy);
+    ASSERT_EQ(configuration[ENABLEREPEAT_DIRECTIVE], neitherNonBlockingPolicy);
+    ASSERT_EQ(configuration[DISABLEREPEAT_DIRECTIVE], neitherNonBlockingPolicy);
+    ASSERT_EQ(configuration[ENABLESHUFFLE_DIRECTIVE], neitherNonBlockingPolicy);
+    ASSERT_EQ(configuration[DISABLESHUFFLE_DIRECTIVE], neitherNonBlockingPolicy);
+    ASSERT_EQ(configuration[SEEK_DIRECTIVE], audioNonBlockingPolicy);
+    ASSERT_EQ(configuration[ADJUSTSEEK_DIRECTIVE], audioNonBlockingPolicy);
+    ASSERT_EQ(configuration[FAVORITE_DIRECTIVE], neitherNonBlockingPolicy);
+    ASSERT_EQ(configuration[UNFAVORITE_DIRECTIVE], neitherNonBlockingPolicy);
 }
 
 /**
  * Test session state information on an ExternalMediaPlayer .
  */
-TEST_F(ExternalMediaPlayerTest, testCallingProvideSessionState) {
+TEST_F(ExternalMediaPlayerTest, test_callingProvideSessionState) {
     EXPECT_CALL(
         *(m_mockContextManager.get()), setState(SESSION_STATE, _, StateRefreshPolicy::ALWAYS, PROVIDE_STATE_TOKEN_TEST))
         .Times(1)
@@ -781,13 +853,13 @@ TEST_F(ExternalMediaPlayerTest, testCallingProvideSessionState) {
     EXPECT_CALL(*(MockExternalMediaPlayerAdapter::m_currentActiveMediaPlayerAdapter), getState());
 
     m_externalMediaPlayer->provideState(SESSION_STATE, PROVIDE_STATE_TOKEN_TEST);
-    ASSERT_TRUE(std::future_status::ready == m_wakeSetStateFuture.wait_for(WAIT_TIMEOUT));
+    ASSERT_TRUE(std::future_status::ready == m_wakeSetStateFuture.wait_for(MY_WAIT_TIMEOUT));
 }
 
 /**
  * Test playback state information on an ExternalMediaPlayer.
  */
-TEST_F(ExternalMediaPlayerTest, testCallingProvidePlaybackState) {
+TEST_F(ExternalMediaPlayerTest, test_callingProvidePlaybackState) {
     EXPECT_CALL(
         *(m_mockContextManager.get()),
         setState(PLAYBACK_STATE, _, StateRefreshPolicy::ALWAYS, PROVIDE_STATE_TOKEN_TEST))
@@ -804,13 +876,13 @@ TEST_F(ExternalMediaPlayerTest, testCallingProvidePlaybackState) {
     EXPECT_CALL(*(MockExternalMediaPlayerAdapter::m_currentActiveMediaPlayerAdapter), getState());
 
     m_externalMediaPlayer->provideState(PLAYBACK_STATE, PROVIDE_STATE_TOKEN_TEST);
-    ASSERT_TRUE(std::future_status::ready == m_wakeSetStateFuture.wait_for(WAIT_TIMEOUT));
+    ASSERT_TRUE(std::future_status::ready == m_wakeSetStateFuture.wait_for(MY_WAIT_TIMEOUT));
 }
 
 /**
  * Test payload with parse error in ExternalMediaPlayer. This should fail.
  */
-TEST_F(ExternalMediaPlayerTest, testPlayParserError) {
+TEST_F(ExternalMediaPlayerTest, test_playParserError) {
     auto avsMessageHeader = std::make_shared<AVSMessageHeader>(
         PLAY_DIRECTIVE.nameSpace, PLAY_DIRECTIVE.name, MESSAGE_ID_TEST, DIALOG_REQUEST_ID_TEST);
 
@@ -827,7 +899,7 @@ TEST_F(ExternalMediaPlayerTest, testPlayParserError) {
 /**
  * Test PLAY payload without an adapter in ExternalMediaPlayer. This should fail.
  */
-TEST_F(ExternalMediaPlayerTest, testPlayNoAdapter) {
+TEST_F(ExternalMediaPlayerTest, test_playNoAdapter) {
     auto avsMessageHeader = std::make_shared<AVSMessageHeader>(
         PLAY_DIRECTIVE.nameSpace, PLAY_DIRECTIVE.name, MESSAGE_ID_TEST, DIALOG_REQUEST_ID_TEST);
 
@@ -844,7 +916,7 @@ TEST_F(ExternalMediaPlayerTest, testPlayNoAdapter) {
 /**
  * Test PLAY payload without play context in ExternalMediaPlayer. This should fail.
  */
-TEST_F(ExternalMediaPlayerTest, testPlayNoPlayContext) {
+TEST_F(ExternalMediaPlayerTest, test_playNoPlayContext) {
     auto avsMessageHeader = std::make_shared<AVSMessageHeader>(
         PLAY_DIRECTIVE.nameSpace, PLAY_DIRECTIVE.name, MESSAGE_ID_TEST, DIALOG_REQUEST_ID_TEST);
 
@@ -861,7 +933,7 @@ TEST_F(ExternalMediaPlayerTest, testPlayNoPlayContext) {
 /**
  * Test PLAY payload without playerId in ExternalMediaPlayer. This should fail.
  */
-TEST_F(ExternalMediaPlayerTest, testPlayNoPlayerId) {
+TEST_F(ExternalMediaPlayerTest, test_playNoPlayerId) {
     auto avsMessageHeader = std::make_shared<AVSMessageHeader>(
         PLAY_DIRECTIVE.nameSpace, PLAY_DIRECTIVE.name, MESSAGE_ID_TEST, DIALOG_REQUEST_ID_TEST);
 
@@ -878,7 +950,7 @@ TEST_F(ExternalMediaPlayerTest, testPlayNoPlayerId) {
 /**
  * Test PLAY payload without offsetin ExternalMediaPlayer. This should succeed.
  */
-TEST_F(ExternalMediaPlayerTest, testPlayNoOffset) {
+TEST_F(ExternalMediaPlayerTest, test_playNoOffset) {
     auto avsMessageHeader = std::make_shared<AVSMessageHeader>(
         PLAY_DIRECTIVE.nameSpace, PLAY_DIRECTIVE.name, MESSAGE_ID_TEST, DIALOG_REQUEST_ID_TEST);
 
@@ -895,7 +967,7 @@ TEST_F(ExternalMediaPlayerTest, testPlayNoOffset) {
 /**
  * Test PLAY payload without index in ExternalMediaPlayer. This should succeed.
  */
-TEST_F(ExternalMediaPlayerTest, testPlayNoIndex) {
+TEST_F(ExternalMediaPlayerTest, test_playNoIndex) {
     auto avsMessageHeader = std::make_shared<AVSMessageHeader>(
         PLAY_DIRECTIVE.nameSpace, PLAY_DIRECTIVE.name, MESSAGE_ID_TEST, DIALOG_REQUEST_ID_TEST);
 
@@ -912,7 +984,7 @@ TEST_F(ExternalMediaPlayerTest, testPlayNoIndex) {
 /**
  * Test successful logout.
  */
-TEST_F(ExternalMediaPlayerTest, testLogout) {
+TEST_F(ExternalMediaPlayerTest, test_logout) {
     auto avsMessageHeader = std::make_shared<AVSMessageHeader>(
         LOGOUT_DIRECTIVE.nameSpace, LOGOUT_DIRECTIVE.name, MESSAGE_ID_TEST, DIALOG_REQUEST_ID_TEST);
 
@@ -929,7 +1001,7 @@ TEST_F(ExternalMediaPlayerTest, testLogout) {
 /**
  * Test successful login.
  */
-TEST_F(ExternalMediaPlayerTest, testLogin) {
+TEST_F(ExternalMediaPlayerTest, test_login) {
     auto avsMessageHeader = std::make_shared<AVSMessageHeader>(
         LOGIN_DIRECTIVE.nameSpace, LOGIN_DIRECTIVE.name, MESSAGE_ID_TEST, DIALOG_REQUEST_ID_TEST);
 
@@ -948,9 +1020,111 @@ TEST_F(ExternalMediaPlayerTest, testLogin) {
 }
 
 /**
+ * Test observers of session state are correctly notified
+ */
+TEST_F(ExternalMediaPlayerTest, test_loginStateChangeObserverIsNotified) {
+    // add a mock observer
+    auto observer = MockExternalMediaPlayerObserver::getInstance();
+    m_externalMediaPlayer->addObserver(observer);
+
+    EXPECT_CALL(
+        *(m_mockContextManager.get()), setState(SESSION_STATE, _, StateRefreshPolicy::ALWAYS, PROVIDE_STATE_TOKEN_TEST))
+        .Times(1)
+        .WillOnce(InvokeWithoutArgs(this, &ExternalMediaPlayerTest::wakeOnSetState));
+
+    EXPECT_CALL(*(MockExternalMediaPlayerAdapter::m_currentActiveMediaPlayerAdapter), getState())
+        .WillRepeatedly(Return(createAdapterState()));
+
+    ObservableSessionProperties observableSessionProperties{false, PLAYER_USER_NAME};
+    EXPECT_CALL(*(observer), onLoginStateProvided(PLAYER_ID, observableSessionProperties)).Times(1);
+
+    m_externalMediaPlayer->provideState(SESSION_STATE, PROVIDE_STATE_TOKEN_TEST);
+    ASSERT_TRUE(std::future_status::ready == m_wakeSetStateFuture.wait_for(MY_WAIT_TIMEOUT));
+}
+
+/**
+ * Test observers of playback state are correctly notified
+ */
+TEST_F(ExternalMediaPlayerTest, test_playbackStateChangeObserverIsNotified) {
+    // add a mock observer
+    auto observer = MockExternalMediaPlayerObserver::getInstance();
+    m_externalMediaPlayer->addObserver(observer);
+
+    EXPECT_CALL(
+        *(m_mockContextManager.get()),
+        setState(PLAYBACK_STATE, _, StateRefreshPolicy::ALWAYS, PROVIDE_STATE_TOKEN_TEST))
+        .Times(1)
+        .WillRepeatedly(InvokeWithoutArgs(this, &ExternalMediaPlayerTest::wakeOnSetState));
+
+    EXPECT_CALL(*(MockExternalMediaPlayerAdapter::m_currentActiveMediaPlayerAdapter), getState())
+        .WillRepeatedly(Return(createAdapterState()));
+
+    ObservablePlaybackStateProperties observablePlaybackStateProperties{PLAYER_STATE, PLAYER_TRACK};
+    EXPECT_CALL(*(observer), onPlaybackStateProvided(PLAYER_ID, observablePlaybackStateProperties)).Times(1);
+
+    m_externalMediaPlayer->provideState(PLAYBACK_STATE, PROVIDE_STATE_TOKEN_TEST);
+    ASSERT_TRUE(std::future_status::ready == m_wakeSetStateFuture.wait_for(MY_WAIT_TIMEOUT));
+}
+
+/**
+ * Test that after removal login observers are not called anymore
+ */
+TEST_F(ExternalMediaPlayerTest, test_loginStateChangeObserverRemoval) {
+    // add a mock observer
+    auto observer = MockExternalMediaPlayerObserver::getInstance();
+    m_externalMediaPlayer->addObserver(observer);
+
+    EXPECT_CALL(
+        *(m_mockContextManager.get()), setState(SESSION_STATE, _, StateRefreshPolicy::ALWAYS, PROVIDE_STATE_TOKEN_TEST))
+        .Times(2)
+        .WillRepeatedly(InvokeWithoutArgs(this, &ExternalMediaPlayerTest::wakeOnSetState));
+
+    EXPECT_CALL(*(MockExternalMediaPlayerAdapter::m_currentActiveMediaPlayerAdapter), getState())
+        .WillRepeatedly(Return(createAdapterState()));
+    EXPECT_CALL(*(observer), onLoginStateProvided(_, _)).Times(1);
+    m_externalMediaPlayer->provideState(SESSION_STATE, PROVIDE_STATE_TOKEN_TEST);
+    ASSERT_TRUE(std::future_status::ready == m_wakeSetStateFuture.wait_for(MY_WAIT_TIMEOUT));
+    this->resetWakeOnSetState();
+
+    m_externalMediaPlayer->removeObserver(observer);
+
+    EXPECT_CALL(*(observer), onLoginStateProvided(_, _)).Times(0);
+    m_externalMediaPlayer->provideState(SESSION_STATE, PROVIDE_STATE_TOKEN_TEST);
+    ASSERT_TRUE(std::future_status::ready == m_wakeSetStateFuture.wait_for(MY_WAIT_TIMEOUT));
+}
+
+/**
+ * Test that after removal playback state observers are not called anymore
+ */
+TEST_F(ExternalMediaPlayerTest, test_playbackStateChangeObserverRemoval) {
+    // add a mock observer
+    auto observer = MockExternalMediaPlayerObserver::getInstance();
+    m_externalMediaPlayer->addObserver(observer);
+
+    EXPECT_CALL(
+        *(m_mockContextManager.get()),
+        setState(PLAYBACK_STATE, _, StateRefreshPolicy::ALWAYS, PROVIDE_STATE_TOKEN_TEST))
+        .Times(2)
+        .WillRepeatedly(InvokeWithoutArgs(this, &ExternalMediaPlayerTest::wakeOnSetState));
+
+    EXPECT_CALL(*(MockExternalMediaPlayerAdapter::m_currentActiveMediaPlayerAdapter), getState())
+        .WillRepeatedly(Return(createAdapterState()));
+    EXPECT_CALL(*(observer), onPlaybackStateProvided(_, _)).Times(1);
+    m_externalMediaPlayer->provideState(PLAYBACK_STATE, PROVIDE_STATE_TOKEN_TEST);
+    ASSERT_TRUE(std::future_status::ready == m_wakeSetStateFuture.wait_for(MY_WAIT_TIMEOUT));
+    this->resetWakeOnSetState();
+
+    m_externalMediaPlayer->removeObserver(observer);
+
+    EXPECT_CALL(*(observer), onPlaybackStateProvided(_, _)).Times(0);
+    m_externalMediaPlayer->provideState(PLAYBACK_STATE, PROVIDE_STATE_TOKEN_TEST);
+    ASSERT_TRUE(std::future_status::ready == m_wakeSetStateFuture.wait_for(MY_WAIT_TIMEOUT));
+}
+
+/**
  * Test successful resume.
  */
-TEST_F(ExternalMediaPlayerTest, testPlay) {
+TEST_F(ExternalMediaPlayerTest, test_play) {
     auto avsMessageHeader = std::make_shared<AVSMessageHeader>(
         RESUME_DIRECTIVE.nameSpace, RESUME_DIRECTIVE.name, MESSAGE_ID_TEST, DIALOG_REQUEST_ID_TEST);
 
@@ -967,7 +1141,7 @@ TEST_F(ExternalMediaPlayerTest, testPlay) {
 /**
  * Test successful pause.
  */
-TEST_F(ExternalMediaPlayerTest, testPause) {
+TEST_F(ExternalMediaPlayerTest, test_pause) {
     auto avsMessageHeader = std::make_shared<AVSMessageHeader>(
         PAUSE_DIRECTIVE.nameSpace, PAUSE_DIRECTIVE.name, MESSAGE_ID_TEST, DIALOG_REQUEST_ID_TEST);
 
@@ -982,9 +1156,26 @@ TEST_F(ExternalMediaPlayerTest, testPause) {
 }
 
 /**
+ * Test successful stop.
+ */
+TEST_F(ExternalMediaPlayerTest, test_stop) {
+    auto avsMessageHeader = std::make_shared<AVSMessageHeader>(
+        STOP_DIRECTIVE.nameSpace, STOP_DIRECTIVE.name, MESSAGE_ID_TEST, DIALOG_REQUEST_ID_TEST);
+
+    std::shared_ptr<AVSDirective> directive =
+        AVSDirective::create("", avsMessageHeader, createPayloadWithPlayerId(MSP_NAME1), m_attachmentManager, "");
+
+    EXPECT_CALL(*(MockExternalMediaPlayerAdapter::m_currentActiveMediaPlayerAdapter), handlePlayControl(_));
+    EXPECT_CALL(*m_mockDirectiveHandlerResult, setCompleted());
+
+    m_externalMediaPlayer->CapabilityAgent::preHandleDirective(directive, std::move(m_mockDirectiveHandlerResult));
+    m_externalMediaPlayer->CapabilityAgent::handleDirective(MESSAGE_ID_TEST);
+}
+
+/**
  * Test successful next.
  */
-TEST_F(ExternalMediaPlayerTest, testNext) {
+TEST_F(ExternalMediaPlayerTest, test_next) {
     auto avsMessageHeader = std::make_shared<AVSMessageHeader>(
         NEXT_DIRECTIVE.nameSpace, NEXT_DIRECTIVE.name, MESSAGE_ID_TEST, DIALOG_REQUEST_ID_TEST);
 
@@ -1001,7 +1192,7 @@ TEST_F(ExternalMediaPlayerTest, testNext) {
 /**
  * Test successful previous.
  */
-TEST_F(ExternalMediaPlayerTest, testPrevious) {
+TEST_F(ExternalMediaPlayerTest, test_previous) {
     auto avsMessageHeader = std::make_shared<AVSMessageHeader>(
         PREVIOUS_DIRECTIVE.nameSpace, PREVIOUS_DIRECTIVE.name, MESSAGE_ID_TEST, DIALOG_REQUEST_ID_TEST);
 
@@ -1018,7 +1209,7 @@ TEST_F(ExternalMediaPlayerTest, testPrevious) {
 /**
  * Test successful StarOver.
  */
-TEST_F(ExternalMediaPlayerTest, testStartOver) {
+TEST_F(ExternalMediaPlayerTest, test_startOver) {
     auto avsMessageHeader = std::make_shared<AVSMessageHeader>(
         STARTOVER_DIRECTIVE.nameSpace, STARTOVER_DIRECTIVE.name, MESSAGE_ID_TEST, DIALOG_REQUEST_ID_TEST);
 
@@ -1035,7 +1226,7 @@ TEST_F(ExternalMediaPlayerTest, testStartOver) {
 /**
  * Test successful rewind.
  */
-TEST_F(ExternalMediaPlayerTest, testRewind) {
+TEST_F(ExternalMediaPlayerTest, test_rewind) {
     auto avsMessageHeader = std::make_shared<AVSMessageHeader>(
         REWIND_DIRECTIVE.nameSpace, REWIND_DIRECTIVE.name, MESSAGE_ID_TEST, DIALOG_REQUEST_ID_TEST);
 
@@ -1052,7 +1243,7 @@ TEST_F(ExternalMediaPlayerTest, testRewind) {
 /**
  * Test successful fast-forward.
  */
-TEST_F(ExternalMediaPlayerTest, testFastForward) {
+TEST_F(ExternalMediaPlayerTest, test_fastForward) {
     auto avsMessageHeader = std::make_shared<AVSMessageHeader>(
         FASTFORWARD_DIRECTIVE.nameSpace, FASTFORWARD_DIRECTIVE.name, MESSAGE_ID_TEST, DIALOG_REQUEST_ID_TEST);
 
@@ -1069,7 +1260,7 @@ TEST_F(ExternalMediaPlayerTest, testFastForward) {
 /**
  * Test successful EnableRepeatOne.
  */
-TEST_F(ExternalMediaPlayerTest, testEnableRepeatOne) {
+TEST_F(ExternalMediaPlayerTest, test_enableRepeatOne) {
     auto avsMessageHeader = std::make_shared<AVSMessageHeader>(
         ENABLEREPEATONE_DIRECTIVE.nameSpace, ENABLEREPEATONE_DIRECTIVE.name, MESSAGE_ID_TEST, DIALOG_REQUEST_ID_TEST);
 
@@ -1086,7 +1277,7 @@ TEST_F(ExternalMediaPlayerTest, testEnableRepeatOne) {
 /**
  * Test successful EnableRepeat.
  */
-TEST_F(ExternalMediaPlayerTest, testEnableRepeat) {
+TEST_F(ExternalMediaPlayerTest, test_enableRepeat) {
     auto avsMessageHeader = std::make_shared<AVSMessageHeader>(
         ENABLEREPEAT_DIRECTIVE.nameSpace, ENABLEREPEAT_DIRECTIVE.name, MESSAGE_ID_TEST, DIALOG_REQUEST_ID_TEST);
 
@@ -1103,7 +1294,7 @@ TEST_F(ExternalMediaPlayerTest, testEnableRepeat) {
 /**
  * Test successful DisableRepeat.
  */
-TEST_F(ExternalMediaPlayerTest, testDisableRepeat) {
+TEST_F(ExternalMediaPlayerTest, test_disableRepeat) {
     auto avsMessageHeader = std::make_shared<AVSMessageHeader>(
         DISABLEREPEAT_DIRECTIVE.nameSpace, DISABLEREPEAT_DIRECTIVE.name, MESSAGE_ID_TEST, DIALOG_REQUEST_ID_TEST);
 
@@ -1120,7 +1311,7 @@ TEST_F(ExternalMediaPlayerTest, testDisableRepeat) {
 /**
  * Test successful EnableShuffle.
  */
-TEST_F(ExternalMediaPlayerTest, testEnableShuffle) {
+TEST_F(ExternalMediaPlayerTest, test_enableShuffle) {
     auto avsMessageHeader = std::make_shared<AVSMessageHeader>(
         ENABLESHUFFLE_DIRECTIVE.nameSpace, ENABLESHUFFLE_DIRECTIVE.name, MESSAGE_ID_TEST, DIALOG_REQUEST_ID_TEST);
 
@@ -1137,7 +1328,7 @@ TEST_F(ExternalMediaPlayerTest, testEnableShuffle) {
 /**
  * Test successful DisableRepeat.
  */
-TEST_F(ExternalMediaPlayerTest, testDisableShuffle) {
+TEST_F(ExternalMediaPlayerTest, test_disableShuffle) {
     auto avsMessageHeader = std::make_shared<AVSMessageHeader>(
         DISABLESHUFFLE_DIRECTIVE.nameSpace, DISABLESHUFFLE_DIRECTIVE.name, MESSAGE_ID_TEST, DIALOG_REQUEST_ID_TEST);
 
@@ -1154,7 +1345,7 @@ TEST_F(ExternalMediaPlayerTest, testDisableShuffle) {
 /**
  * Test successful Favorite.
  */
-TEST_F(ExternalMediaPlayerTest, testFavorite) {
+TEST_F(ExternalMediaPlayerTest, test_favorite) {
     auto avsMessageHeader = std::make_shared<AVSMessageHeader>(
         FAVORITE_DIRECTIVE.nameSpace, FAVORITE_DIRECTIVE.name, MESSAGE_ID_TEST, DIALOG_REQUEST_ID_TEST);
 
@@ -1171,7 +1362,7 @@ TEST_F(ExternalMediaPlayerTest, testFavorite) {
 /**
  * Test successful UnFavorite.
  */
-TEST_F(ExternalMediaPlayerTest, testUnfavorite) {
+TEST_F(ExternalMediaPlayerTest, test_unfavorite) {
     auto avsMessageHeader = std::make_shared<AVSMessageHeader>(
         UNFAVORITE_DIRECTIVE.nameSpace, UNFAVORITE_DIRECTIVE.name, MESSAGE_ID_TEST, DIALOG_REQUEST_ID_TEST);
 
@@ -1188,7 +1379,7 @@ TEST_F(ExternalMediaPlayerTest, testUnfavorite) {
 /**
  * Test incorrect directive.
  */
-TEST_F(ExternalMediaPlayerTest, testIncorrectDirective) {
+TEST_F(ExternalMediaPlayerTest, test_incorrectDirective) {
     auto avsMessageHeader = std::make_shared<AVSMessageHeader>(
         FAVORITE_DIRECTIVE.nameSpace, PREVIOUS_DIRECTIVE.name, MESSAGE_ID_TEST, DIALOG_REQUEST_ID_TEST);
 
@@ -1205,7 +1396,7 @@ TEST_F(ExternalMediaPlayerTest, testIncorrectDirective) {
 /**
  * Test Seek failure passing incorrect field in payload.
  */
-TEST_F(ExternalMediaPlayerTest, testSeekFailure) {
+TEST_F(ExternalMediaPlayerTest, test_seekFailure) {
     auto avsMessageHeader = std::make_shared<AVSMessageHeader>(
         SEEK_DIRECTIVE.nameSpace, SEEK_DIRECTIVE.name, MESSAGE_ID_TEST, DIALOG_REQUEST_ID_TEST);
 
@@ -1222,7 +1413,7 @@ TEST_F(ExternalMediaPlayerTest, testSeekFailure) {
 /**
  * Test successful Seek.
  */
-TEST_F(ExternalMediaPlayerTest, testSeekSuccess) {
+TEST_F(ExternalMediaPlayerTest, test_seekSuccess) {
     auto avsMessageHeader = std::make_shared<AVSMessageHeader>(
         SEEK_DIRECTIVE.nameSpace, SEEK_DIRECTIVE.name, MESSAGE_ID_TEST, DIALOG_REQUEST_ID_TEST);
 
@@ -1239,7 +1430,7 @@ TEST_F(ExternalMediaPlayerTest, testSeekSuccess) {
 /**
  * Test  AdjustSeek failure incorrect field in payload.
  */
-TEST_F(ExternalMediaPlayerTest, testAdjustSeekFailure) {
+TEST_F(ExternalMediaPlayerTest, test_adjustSeekFailure) {
     auto avsMessageHeader = std::make_shared<AVSMessageHeader>(
         ADJUSTSEEK_DIRECTIVE.nameSpace, ADJUSTSEEK_DIRECTIVE.name, MESSAGE_ID_TEST, DIALOG_REQUEST_ID_TEST);
 
@@ -1256,7 +1447,7 @@ TEST_F(ExternalMediaPlayerTest, testAdjustSeekFailure) {
 /**
  * Test  AdjustSeek failure passing in an incorrect offset.
  */
-TEST_F(ExternalMediaPlayerTest, testAdjustSeekFailure2) {
+TEST_F(ExternalMediaPlayerTest, test_adjustSeekFailure2) {
     auto avsMessageHeader = std::make_shared<AVSMessageHeader>(
         ADJUSTSEEK_DIRECTIVE.nameSpace, ADJUSTSEEK_DIRECTIVE.name, MESSAGE_ID_TEST, DIALOG_REQUEST_ID_TEST);
 
@@ -1273,7 +1464,7 @@ TEST_F(ExternalMediaPlayerTest, testAdjustSeekFailure2) {
 /**
  * Test  AdjustSeek successful passing in correct payload and offset.
  */
-TEST_F(ExternalMediaPlayerTest, testAdjustSeekSuccess) {
+TEST_F(ExternalMediaPlayerTest, test_adjustSeekSuccess) {
     auto avsMessageHeader = std::make_shared<AVSMessageHeader>(
         ADJUSTSEEK_DIRECTIVE.nameSpace, ADJUSTSEEK_DIRECTIVE.name, MESSAGE_ID_TEST, DIALOG_REQUEST_ID_TEST);
 

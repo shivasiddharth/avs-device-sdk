@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * Copyright 2017-2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License").
  * You may not use this file except in compliance with the License.
@@ -419,7 +419,7 @@ bool SQLiteAlertStorage::migrateAlertsDbFromV1ToV2() {
     // the migration is fine.
     if (m_db.tableExists(ALERTS_TABLE_NAME)) {
         std::vector<std::shared_ptr<Alert>> alertContainer;
-        if (!loadHelper(ALERTS_DATABASE_VERSION_ONE, &alertContainer)) {
+        if (!loadHelper(ALERTS_DATABASE_VERSION_ONE, &alertContainer, nullptr)) {
             ACSDK_ERROR(LX("migrateAlertsDbFromV1ToV2Failed").m("Could not load V1 alert records."));
             return false;
         }
@@ -675,7 +675,7 @@ bool SQLiteAlertStorage::store(std::shared_ptr<Alert> alert) {
     staticData.dbId = id;
 
     if (!alert->setAlertData(&staticData, nullptr)) {
-        ACSDK_ERROR(LX("loadHelperFailed").m("Could not set alert data."));
+        ACSDK_ERROR(LX("storeFailed").m("Could not set alert data."));
         return false;
     }
 
@@ -692,6 +692,13 @@ bool SQLiteAlertStorage::store(std::shared_ptr<Alert> alert) {
     return true;
 }
 
+/**
+ * Loads asset data into the map.
+ *
+ * @param db The database object to read data from.
+ * @param alertAssetsMap The map that will receive the assets.
+ * @return @c true if data was loaded successfully
+ */
 static bool loadAlertAssets(SQLiteDatabase* db, std::map<int, std::vector<Alert::Asset>>* alertAssetsMap) {
     const std::string sqlString = "SELECT * FROM " + ALERT_ASSETS_TABLE_NAME + ";";
 
@@ -734,6 +741,13 @@ static bool loadAlertAssets(SQLiteDatabase* db, std::map<int, std::vector<Alert:
     return true;
 }
 
+/**
+ * Reads the assets order from the database and stores this data on the given map.
+ *
+ * @param db The database object to read data from.
+ * @param alertAssetOrderItemsMap The map that will receive data.
+ * @return @c true if data was loaded successfully from the database
+ */
 static bool loadAlertAssetPlayOrderItems(
     SQLiteDatabase* db,
     std::map<int, std::set<AssetOrderItem, AssetOrderItemCompare>>* alertAssetOrderItemsMap) {
@@ -778,7 +792,10 @@ static bool loadAlertAssetPlayOrderItems(
     return true;
 }
 
-bool SQLiteAlertStorage::loadHelper(int dbVersion, std::vector<std::shared_ptr<Alert>>* alertContainer) {
+bool SQLiteAlertStorage::loadHelper(
+    int dbVersion,
+    std::vector<std::shared_ptr<Alert>>* alertContainer,
+    std::shared_ptr<settings::DeviceSettingsManager> settingsManager) {
     if (!alertContainer) {
         ACSDK_ERROR(LX("loadHelperFailed").m("Alert container parameter is nullptr."));
         return false;
@@ -786,6 +803,20 @@ bool SQLiteAlertStorage::loadHelper(int dbVersion, std::vector<std::shared_ptr<A
 
     if (dbVersion != ALERTS_DATABASE_VERSION_ONE && dbVersion != ALERTS_DATABASE_VERSION_TWO) {
         ACSDK_ERROR(LX("loadHelperFailed").d("Invalid version", dbVersion));
+        return false;
+    }
+
+    // Loads the assets map from the database
+    std::map<int, std::vector<Alert::Asset>> alertAssetsMap;
+    if (!loadAlertAssets(&m_db, &alertAssetsMap)) {
+        ACSDK_ERROR(LX("loadHelperFailed").m("Could not load alert assets."));
+        return false;
+    }
+
+    // Loads the asset order item map from the database
+    std::map<int, std::set<AssetOrderItem, AssetOrderItemCompare>> alertAssetOrderItemsMap;
+    if (!loadAlertAssetPlayOrderItems(&m_db, &alertAssetOrderItemsMap)) {
+        ACSDK_ERROR(LX("loadHelperFailed").m("Could not load alert asset play order items."));
         return false;
     }
 
@@ -846,12 +877,14 @@ bool SQLiteAlertStorage::loadHelper(int dbVersion, std::vector<std::shared_ptr<A
 
         std::shared_ptr<Alert> alert;
         if (ALERT_EVENT_TYPE_ALARM == type) {
-            alert = std::make_shared<Alarm>(m_alertsAudioFactory->alarmDefault(), m_alertsAudioFactory->alarmShort());
+            alert = std::make_shared<Alarm>(
+                m_alertsAudioFactory->alarmDefault(), m_alertsAudioFactory->alarmShort(), settingsManager);
         } else if (ALERT_EVENT_TYPE_TIMER == type) {
-            alert = std::make_shared<Timer>(m_alertsAudioFactory->timerDefault(), m_alertsAudioFactory->timerShort());
+            alert = std::make_shared<Timer>(
+                m_alertsAudioFactory->timerDefault(), m_alertsAudioFactory->timerShort(), settingsManager);
         } else if (ALERT_EVENT_TYPE_REMINDER == type) {
             alert = std::make_shared<Reminder>(
-                m_alertsAudioFactory->reminderDefault(), m_alertsAudioFactory->reminderShort());
+                m_alertsAudioFactory->reminderDefault(), m_alertsAudioFactory->reminderShort(), settingsManager);
         } else {
             ACSDK_ERROR(
                 LX("loadHelperFailed").m("Could not instantiate an alert object.").d("type read from database", type));
@@ -868,6 +901,20 @@ bool SQLiteAlertStorage::loadHelper(int dbVersion, std::vector<std::shared_ptr<A
         dynamicData.loopCount = loopCount;
         staticData.assetConfiguration.loopPause = std::chrono::milliseconds{loopPauseInMilliseconds};
         staticData.assetConfiguration.backgroundAssetId = backgroundAssetId;
+
+        // alertAssetsMap is an alert id to asset map
+        if (alertAssetsMap.find(id) != alertAssetsMap.end()) {
+            for (auto& mapEntry : alertAssetsMap[id]) {
+                staticData.assetConfiguration.assets[mapEntry.id] = mapEntry;
+            }
+        }
+
+        // alertAssetOrderItemsMap is an alert id to asset order items map
+        if (alertAssetOrderItemsMap.find(id) != alertAssetOrderItemsMap.end()) {
+            for (auto& mapEntry : alertAssetOrderItemsMap[id]) {
+                staticData.assetConfiguration.assetPlayOrderItems.push_back(mapEntry.name);
+            }
+        }
 
         if (!dbFieldToAlertState(state, &dynamicData.state)) {
             ACSDK_ERROR(LX("loadHelperFailed").m("Could not convert alert state."));
@@ -886,36 +933,13 @@ bool SQLiteAlertStorage::loadHelper(int dbVersion, std::vector<std::shared_ptr<A
 
     statement->finalize();
 
-    std::map<int, std::vector<Alert::Asset>> alertAssetsMap;
-    if (!loadAlertAssets(&m_db, &alertAssetsMap)) {
-        ACSDK_ERROR(LX("loadHelperFailed").m("Could not load alert assets."));
-        return false;
-    }
-
-    std::map<int, std::set<AssetOrderItem, AssetOrderItemCompare>> alertAssetOrderItemsMap;
-    if (!loadAlertAssetPlayOrderItems(&m_db, &alertAssetOrderItemsMap)) {
-        ACSDK_ERROR(LX("loadHelperFailed").m("Could not load alert asset play order items."));
-        return false;
-    }
-
-    for (auto alert : *alertContainer) {
-        if (alertAssetsMap.find(alert->getId()) != alertAssetsMap.end()) {
-            for (auto& mapEntry : alertAssetsMap[alert->getId()]) {
-                alert->getAssetConfiguration().assets[mapEntry.id] = mapEntry;
-            }
-        }
-        if (alertAssetOrderItemsMap.find(alert->getId()) != alertAssetOrderItemsMap.end()) {
-            for (auto& mapEntry : alertAssetOrderItemsMap[alert->getId()]) {
-                alert->getAssetConfiguration().assetPlayOrderItems.push_back(mapEntry.name);
-            }
-        }
-    }
-
     return true;
 }
 
-bool SQLiteAlertStorage::load(std::vector<std::shared_ptr<Alert>>* alertContainer) {
-    return loadHelper(ALERTS_DATABASE_VERSION_TWO, alertContainer);
+bool SQLiteAlertStorage::load(
+    std::vector<std::shared_ptr<Alert>>* alertContainer,
+    std::shared_ptr<settings::DeviceSettingsManager> settingsManager) {
+    return loadHelper(ALERTS_DATABASE_VERSION_TWO, alertContainer, settingsManager);
 }
 
 bool SQLiteAlertStorage::modify(std::shared_ptr<Alert> alert) {
@@ -1182,7 +1206,7 @@ static void printAlertsSummary(
 
 void SQLiteAlertStorage::printStats(StatLevel level) {
     std::vector<std::shared_ptr<Alert>> alerts;
-    load(&alerts);
+    load(&alerts, nullptr);
     switch (level) {
         case StatLevel::ONE_LINE:
             printOneLineSummary(&m_db);

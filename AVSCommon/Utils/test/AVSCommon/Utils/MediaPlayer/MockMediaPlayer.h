@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * Copyright 2017-2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License").
  * You may not use this file except in compliance with the License.
@@ -16,10 +16,15 @@
 #ifndef ALEXA_CLIENT_SDK_AVSCOMMON_UTILS_TEST_AVSCOMMON_UTILS_MEDIAPLAYER_MOCKMEDIAPLAYER_H_
 #define ALEXA_CLIENT_SDK_AVSCOMMON_UTILS_TEST_AVSCOMMON_UTILS_MEDIAPLAYER_MOCKMEDIAPLAYER_H_
 
+#include <unordered_set>
+
 #include <gmock/gmock.h>
 
 #include "AVSCommon/Utils/MediaPlayer/MediaPlayerInterface.h"
+#include "AVSCommon/Utils/MediaPlayer/MediaPlayerObserverInterface.h"
+#include "AVSCommon/Utils/MediaPlayer/SourceConfig.h"
 #include "AVSCommon/Utils/RequiresShutdown.h"
+#include "AVSCommon/Utils/Timing/Stopwatch.h"
 
 namespace alexaClientSDK {
 namespace avsCommon {
@@ -69,6 +74,7 @@ class MockMediaPlayer
         , public RequiresShutdown {
 public:
     using observer = avsCommon::utils::mediaPlayer::MediaPlayerObserverInterface;
+    using MediaPlayerState = avsCommon::utils::mediaPlayer::MediaPlayerState;
 
     /**
      * Creates an instance of the @c MockMediaPlayer.
@@ -76,6 +82,16 @@ public:
      * @return An instance of the @c MockMediaPlayer.
      */
     static std::shared_ptr<testing::NiceMock<MockMediaPlayer>> create();
+
+    /**
+     * Configures the MockMediaPlayer to support concurrent MediaPlayers.
+     * Concurrent players differ  in that they don't assume that
+     * the last Player with 'setSource' called is the 'current' player.
+     * Instead, the last player on which 'play' was called is the current player.
+     * This is used in tests involving pre-buffering, where multiple players may have had 'setSource' called.
+     * The enabled state will persist until 'doShutdown' is called
+     */
+    static void enableConcurrentMediaPlayers();
 
     MockMediaPlayer();
 
@@ -85,12 +101,19 @@ public:
     /// @{
     SourceId setSource(
         std::shared_ptr<avsCommon::avs::attachment::AttachmentReader> attachmentReader,
-        const avsCommon::utils::AudioFormat* audioFormat = nullptr) /*override*/;
+        const avsCommon::utils::AudioFormat* audioFormat = nullptr,
+        const SourceConfig& config = emptySourceConfig()) /*override*/;
     SourceId setSource(
         const std::string& url,
-        std::chrono::milliseconds offset = std::chrono::milliseconds::zero()) /*override*/;
-    SourceId setSource(std::shared_ptr<std::istream> stream, bool repeat) /*override*/;
-    void setObserver(std::shared_ptr<observer> playerObserver) /*override*/;
+        std::chrono::milliseconds offset = std::chrono::milliseconds::zero(),
+        const SourceConfig& config = emptySourceConfig(),
+        bool repeat = false) /*override*/;
+    SourceId setSource(
+        std::shared_ptr<std::istream> stream,
+        bool repeat = false,
+        const SourceConfig& config = emptySourceConfig()) /*override*/;
+    void addObserver(std::shared_ptr<observer> playerObserver) /*override*/;
+    void removeObserver(std::shared_ptr<observer> playerObserver) /*override*/;
     /// @}
 
     MOCK_METHOD1(play, bool(SourceId));
@@ -99,6 +122,9 @@ public:
     MOCK_METHOD1(stop, bool(SourceId));
     MOCK_METHOD1(getOffset, std::chrono::milliseconds(SourceId));
     MOCK_METHOD0(getNumBytesBuffered, uint64_t());
+    MOCK_METHOD1(
+        getMediaPlayerState,
+        avsCommon::utils::Optional<avsCommon::utils::mediaPlayer::MediaPlayerState>(SourceId));
 
     /// @name RequiresShutdown overrides
     /// @{
@@ -173,7 +199,20 @@ public:
     std::chrono::milliseconds mockGetOffset(SourceId id);
 
     /**
+     * This is a mock method which gives the @c sourceId and the offset through @c getOffset()
+     */
+    avsCommon::utils::Optional<avsCommon::utils::mediaPlayer::MediaPlayerState> mockGetState(SourceId id);
+
+    /**
+     * Reset the timer used in the following waitXXX methods.
+     * Used to test resuming
+     */
+    void resetWaitTimer();
+
+    /**
      * Waits for the next call to @c setSource().
+     * When concurrentMediaPlayers are enabled, this function will wait for the next call to any instance's @c
+     * setSource()
      *
      * @param timeout The maximum time to wait.
      * @return @c true if setSource was called within @c timeout milliseconds else @c false.
@@ -182,11 +221,22 @@ public:
 
     /**
      * Waits for the current source to reach the playback started state.
+     * This is only valid when concurrentMediaPlayers are not enabled.
      *
      * @param timeout The maximum time to wait.
      * @return @c true if the state was reached within @c timeout milliseconds else @c false.
      */
     bool waitUntilPlaybackStarted(const std::chrono::milliseconds timeout = std::chrono::milliseconds(DEFAULT_TIME));
+    /**
+     * Waits for a source to reach the playback started state.
+     *
+     * @param timeout The maximum time to wait.
+     * @param is The SourceId of the track waiting to Play
+     * @return @c true if the state was reached within @c timeout milliseconds else @c false.
+     */
+    bool waitUntilPlaybackStarted(
+        SourceId id,
+        const std::chrono::milliseconds timeout = std::chrono::milliseconds(DEFAULT_TIME));
 
     /**
      * Waits for the current source to reach the playback paused state.
@@ -235,6 +285,28 @@ public:
      */
     SourceId getCurrentSourceId();
 
+    /**
+     * Get the SourceId for this MediaPlayer instance
+     *
+     * @return the SourceId for this MediaPlayer instance
+     */
+    SourceId getSourceId();
+
+    /**
+     * Get the SourceId for the most recent MediaPlayer.setSource()
+     *
+     * @return the SourceId for the MediaPlayer instance
+     */
+    SourceId getLatestSourceId();
+
+    /**
+     * Get the list of current observers.
+     *
+     * @return List of current observers to this.
+     */
+    std::unordered_set<std::shared_ptr<avsCommon::utils::mediaPlayer::MediaPlayerObserverInterface>> getObservers()
+        const;
+
 private:
     struct Source;
 
@@ -253,7 +325,7 @@ private:
         SourceState(
             Source* source,
             const std::string& name,
-            std::function<void(std::shared_ptr<observer>, SourceId)> notifyFunction);
+            std::function<void(std::shared_ptr<observer>, SourceId, const MediaPlayerState&)> notifyFunction);
 
         /**
          * Destructor.  If necessary, wakes and joins m_thread (cancelling any non-started notification)
@@ -273,7 +345,7 @@ private:
          * @param timeout How long to wait to reach this state before giving up.
          * @return Whether or not this state was reached.
          */
-        bool wait(const std::chrono::milliseconds timeout);
+        bool wait(std::chrono::milliseconds timeout);
 
         /**
          * Reset this state to unreached.
@@ -284,19 +356,22 @@ private:
         /**
          * Make notification callback to report reaching this state.
          *
+         * @param observers List of observers to notify
          * @param timeout How long to wait before giving up on actually reaching the state and delivering
          * an @c onPlaybackFailed() callback, instead.
          */
-        void notify(const std::chrono::milliseconds timeout);
+        void notify(
+            const std::unordered_set<std::shared_ptr<MediaPlayerObserverInterface>>& observer,
+            std::chrono::milliseconds timeout);
 
         /// The source whose state we are tracking.
         Source* m_source;
 
         /// Name of this state (for logging).
-        const std::string& m_name;
+        std::string m_name;
 
         /// The function to use to deliver this notification.
-        std::function<void(std::shared_ptr<observer>, SourceId)> m_notifyFunction;
+        std::function<void(std::shared_ptr<observer>, SourceId, const MediaPlayerState&)> m_notifyFunction;
 
         /// Used to serialize access to some data members.
         std::mutex m_mutex;
@@ -353,6 +428,9 @@ private:
 
         /// Tracks if playbackError state has been reached.
         SourceState error;
+
+        /// Tracks how far mocked playback has progressed, using elapsed real time.
+        avsCommon::utils::timing::Stopwatch stopwatch;
     };
 
     /**
@@ -363,14 +441,42 @@ private:
      */
     std::shared_ptr<Source> getCurrentSource(SourceId sourceId);
 
-    /// Serialize access to m_sources.
-    std::mutex m_mutex;
+    /**
+     * Get the @c Source previous to the current, but only if it matches the specified @c SourceId.
+     *
+     * @param The @c SourceId to match with the previous source.
+     * @return The current @c Source, or nullptr if the previous source does not match @c sourceId.
+     */
+    std::shared_ptr<Source> getPreviousSource(SourceId sourceId);
 
-    /// All sources fed to this MediaPlayer
-    std::vector<std::shared_ptr<Source>> m_sources;
+    /**
+     * Returns true if sourceId is one that was returned by a call to 'setSource'.
+     *
+     * @param sourceId sourceId to validate
+     * @return true if valid
+     */
+    bool isValidSourceId(SourceId sourceId);
 
-    /// The player observer to be notified of the media player state changes.
-    std::shared_ptr<avsCommon::utils::mediaPlayer::MediaPlayerObserverInterface> m_playerObserver;
+    /// Serialize access to instance data
+    mutable std::mutex m_mutex;
+
+    /// Serialize access to m_sources and global ids.
+    static std::mutex m_globalMutex;
+
+    /// All sources fed to this MediaPlayer.  Static so its global across many instances
+    static std::vector<std::shared_ptr<Source>> m_sources;
+
+    /// The Current SourceID
+    static std::atomic<SourceId> m_currentSourceId;
+
+    /// The Previous SourceID (or MediaPlayerInterface::ERROR, if there is no previous)
+    static SourceId m_previousSourceId;
+
+    /// Concurrent mode
+    static bool m_isConcurrentEnabled;
+
+    /// The player observers to be notified of the media player state changes.
+    std::unordered_set<std::shared_ptr<avsCommon::utils::mediaPlayer::MediaPlayerObserverInterface>> m_playerObservers;
 };
 
 }  // namespace test

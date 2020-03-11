@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * Copyright 2017-2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License").
  * You may not use this file except in compliance with the License.
@@ -23,6 +23,8 @@
 #include <AVSCommon/AVS/FocusState.h>
 #include <AVSCommon/Utils/Timing/Timer.h>
 #include <AVSCommon/Utils/Timing/TimePoint.h>
+
+#include <Settings/DeviceSettingsManager.h>
 
 #include <map>
 #include <memory>
@@ -115,7 +117,7 @@ public:
         std::string url;
     };
 
-    /*
+    /**
      * A utility structure to encapsulate the data reflecting custom assets for an alert.
      */
     struct AssetConfiguration {
@@ -248,7 +250,8 @@ public:
      */
     Alert(
         std::function<std::unique_ptr<std::istream>()> defaultAudioFactory,
-        std::function<std::unique_ptr<std::istream>()> shortAudioFactory);
+        std::function<std::unique_ptr<std::istream>()> shortAudioFactory,
+        std::shared_ptr<settings::DeviceSettingsManager> settingsManager);
 
     /**
      * Returns a string to identify the type of the class.  Required for persistent storage.
@@ -317,11 +320,22 @@ public:
     void deactivate(StopReason reason);
 
     /**
+     * Performs relevant operations to update this alarm to the new time provided.
+     *
+     * @note Use @c snooze for active alarms. This method will fail since it does not stop alarm rendering.
+     * @note The caller should validate the new schedule which should not be more than 30 minutes in the past.
+     * @param newScheduledTime The new time for the alarm to occur, in ISO-8601 format.
+     * @return @c true if it succeeds; @c false otherwise.
+     */
+    bool updateScheduledTime(const std::string& newScheduledTime);
+
+    /**
      * Performs relevant operations to snooze this alarm to the new time provided.
      *
-     * @param updatedScheduledTime_ISO_8601 The new time for the alarm to occur, in ISO-8601 format.
+     * @param updatedScheduledTime The new time for the alarm to occur, in ISO-8601 format.
+     * @return @c true if it succeeds; @c false otherwise.
      */
-    void snooze(const std::string& updatedScheduledTime_ISO_8601);
+    bool snooze(const std::string& updatedScheduledTime);
 
     /**
      * Sets the focus state for the alert.
@@ -447,9 +461,14 @@ private:
     std::string getScheduledTime_ISO_8601Locked() const;
 
     /**
-     * Utility function to begin the alert's renderer.
+     * Utility function to begin the alert's renderer in an unlocked context
      */
     void startRenderer();
+
+    /**
+     * Utility function to begin the alert's renderer in a locked context
+     */
+    void startRendererLocked();
 
     /**
      * A utility function to be invoked when the maximum time for an alert has expired.
@@ -478,6 +497,8 @@ private:
     const std::function<std::unique_ptr<std::istream>()> m_defaultAudioFactory;
     /// This is the factory that provides a short audio stream.
     const std::function<std::unique_ptr<std::istream>()> m_shortAudioFactory;
+    /// The settings manager used to retrieve the value of alarm volume ramp setting.
+    std::shared_ptr<settings::DeviceSettingsManager> m_settingsManager;
 };
 
 /**

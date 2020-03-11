@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * Copyright 2017-2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License").
  * You may not use this file except in compliance with the License.
@@ -16,14 +16,15 @@
 #ifndef ALEXA_CLIENT_SDK_CAPABILITYAGENTS_ALERTS_INCLUDE_ALERTS_ALERTSCHEDULER_H_
 #define ALEXA_CLIENT_SDK_CAPABILITYAGENTS_ALERTS_INCLUDE_ALERTS_ALERTSCHEDULER_H_
 
-#include "Alerts/Storage/AlertStorageInterface.h"
 #include "Alerts/AlertObserverInterface.h"
+#include "Alerts/Storage/AlertStorageInterface.h"
 
 #include <AVSCommon/AVS/FocusState.h>
+#include <Settings/DeviceSettingsManager.h>
 
+#include <list>
 #include <set>
 #include <string>
-#include <list>
 
 namespace alexaClientSDK {
 namespace capabilityAgents {
@@ -58,7 +59,11 @@ public:
         std::shared_ptr<renderer::RendererInterface> alertRenderer,
         std::chrono::seconds alertPastDueTimeLimitSeconds);
 
-    void onAlertStateChange(const std::string& alertToken, State state, const std::string& reason = "") override;
+    void onAlertStateChange(
+        const std::string& alertToken,
+        const std::string& alertType,
+        State state,
+        const std::string& reason = "") override;
 
     /**
      * Initialization.
@@ -66,9 +71,12 @@ public:
      * @note This function must be called before other use of an object this class.
      *
      * @param observer An observer which we will notify of all alert state changes.
+     * @param m_settingsManager A settingsManager object that manages alarm volume ramp setting.
      * @return Whether initialization was successful.
      */
-    bool initialize(std::shared_ptr<AlertObserverInterface> observer);
+    bool initialize(
+        std::shared_ptr<AlertObserverInterface> observer,
+        std::shared_ptr<settings::DeviceSettingsManager> settingsManager);
 
     /**
      * Schedule an alert for rendering.
@@ -151,25 +159,45 @@ public:
      */
     void shutdown();
 
+    /**
+     * Utility method to get list of all alerts being tracked by @c AlertScheduler
+     *
+     * @return list of all alerts being tracked by @c AlertScheduler
+     */
+    std::list<std::shared_ptr<Alert>> getAllAlerts();
+
 private:
     /**
      * A handler function which will be called by our internal executor when a managed alert changes state.
      *
      * @param alertToken The AVS token identifying the alert.
+     * @param alertType The type of alert.
      * @param state The state of the alert.
      * @param reason The reason the the state changed, if applicable.
      */
-    void executeOnAlertStateChange(std::string alertToken, State state, std::string reason);
+    void executeOnAlertStateChange(std::string alertToken, std::string alertType, State state, std::string reason);
+
+    /**
+     * Update an alert with the new schedule. This function cannot update an active alert (use snooze instead).
+     *
+     * @param alert The alert to be rescheduled. The alert MUST be inactive.
+     * @param newScheduledTime The new time in ISO-8601 format.
+     * @note The caller should validate the new schedule which should not be more than 30 minutes in the past.
+     * @return Whether the alert was successfully rescheduled.
+     */
+    bool updateAlert(const std::shared_ptr<Alert>& alert, const std::string& newScheduledTime);
 
     /**
      * A utility function which wraps the executor submission to notify our observer.
      *
      * @param alertToken The AVS token identifying the alert.
+     * @param alertType The type of the alert.
      * @param state The state of the alert.
      * @param reason The reason the the state changed, if applicable.
      */
     void notifyObserver(
         const std::string& alertToken,
+        const std::string& alertType,
         AlertObserverInterface::State state,
         const std::string& reason = "");
 
@@ -177,10 +205,15 @@ private:
      * A handler function which will be called by our internal executor when a managed alert changes state.
      *
      * @param alertToken The AVS token identifying the alert.
+     * @param alertType The type of the alert.
      * @param state The state of the alert.
      * @param reason The reason the the state changed, if applicable.
      */
-    void executeNotifyObserver(std::string alertToken, AlertObserverInterface::State state, std::string reason = "");
+    void executeNotifyObserver(
+        const std::string& alertToken,
+        const std::string& alertType,
+        AlertObserverInterface::State state,
+        const std::string& reason = "");
 
     /**
      * Utility function to set the timer for the next scheduled alert.  This function requires @c m_mutex be locked.
@@ -201,8 +234,9 @@ private:
      * Utility function to be called when an alert is ready to activate.
      *
      * @param alertToken The AVS token of the alert that should become active.
+     * @param alertType The type of the alert.
      */
-    void onAlertReady(const std::string& alertToken);
+    void onAlertReady(const std::string& alertToken, const std::string& alertType);
 
     /**
      * Utility function to query if a given alert is active.  This function requires @c m_mutex be locked.
@@ -227,6 +261,14 @@ private:
      */
     void deactivateActiveAlertHelperLocked(Alert::StopReason reason);
 
+    /**
+     * A handler function to erase the alert from the alert storage database and then to notify it's observers
+     * that the alert has been deleted.
+     *
+     * @param alert  The alert to be erased.
+     */
+    void eraseAlert(std::shared_ptr<Alert> alert);
+
     /// This is used to safely access the time utilities.
     avsCommon::utils::timing::TimeUtils m_timeUtils;
 
@@ -235,6 +277,9 @@ private:
      * protection.
      */
     std::shared_ptr<AlertObserverInterface> m_observer;
+
+    /// The settings manager used to retrieve the value of alarm volume ramp setting.
+    std::shared_ptr<settings::DeviceSettingsManager> m_settingsManager;
 
     /// Mutex for accessing all variables besides the observer.
     std::mutex m_mutex;

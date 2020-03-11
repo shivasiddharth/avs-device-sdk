@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * Copyright 2017-2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License").
  * You may not use this file except in compliance with the License.
@@ -43,8 +43,9 @@ static const unsigned int CHUNK_SIZE(4096);
 std::unique_ptr<AttachmentReaderSource> AttachmentReaderSource::create(
     PipelineInterface* pipeline,
     std::shared_ptr<avsCommon::avs::attachment::AttachmentReader> attachmentReader,
-    const avsCommon::utils::AudioFormat* audioFormat) {
-    std::unique_ptr<AttachmentReaderSource> result(new AttachmentReaderSource(pipeline, attachmentReader));
+    const avsCommon::utils::AudioFormat* audioFormat,
+    bool repeat) {
+    std::unique_ptr<AttachmentReaderSource> result(new AttachmentReaderSource(pipeline, attachmentReader, repeat));
     if (result->init(audioFormat)) {
         return result;
     }
@@ -57,9 +58,11 @@ AttachmentReaderSource::~AttachmentReaderSource() {
 
 AttachmentReaderSource::AttachmentReaderSource(
     PipelineInterface* pipeline,
-    std::shared_ptr<avsCommon::avs::attachment::AttachmentReader> reader) :
+    std::shared_ptr<avsCommon::avs::attachment::AttachmentReader> reader,
+    bool repeat) :
         BaseStreamSource{pipeline, "AttachmentReaderSource"},
-        m_reader{reader} {};
+        m_reader{reader},
+        m_repeat{repeat} {};
 
 bool AttachmentReaderSource::isPlaybackRemote() const {
     return false;
@@ -118,6 +121,8 @@ gboolean AttachmentReaderSource::handleReadData() {
             }
         // Fall through if some data was read.
         case AttachmentReader::ReadStatus::OK:
+            notifyObserversOnReadData();
+            // FALL-THROUGH
         case AttachmentReader::ReadStatus::OK_WOULDBLOCK:
         // Fall through to retry reading later.
         case AttachmentReader::ReadStatus::OK_TIMEDOUT:
@@ -135,6 +140,7 @@ gboolean AttachmentReaderSource::handleReadData() {
                 updateOnReadDataHandler();
             }
             return true;
+        case AttachmentReader::ReadStatus::OK_OVERRUN_RESET:  // gstreamer requires stable stream.
         case AttachmentReader::ReadStatus::ERROR_OVERRUN:
         case AttachmentReader::ReadStatus::ERROR_BYTES_LESS_THAN_WORD_SIZE:
         case AttachmentReader::ReadStatus::ERROR_INTERNAL:
@@ -143,10 +149,17 @@ gboolean AttachmentReaderSource::handleReadData() {
             break;
     }
 
-    ACSDK_DEBUG9(LX("handleReadData").d("info", "signalingEndOfData"));
+    if (!m_repeat) {
+        ACSDK_DEBUG9(LX("handleReadData").d("info", "signalingEndOfData"));
+        gst_buffer_unref(buffer);
+        signalEndOfData();
+        return false;
+    }
+
+    m_reader->seek(0);
     gst_buffer_unref(buffer);
-    signalEndOfData();
-    return false;
+    updateOnReadDataHandler();
+    return true;
 }
 
 gboolean AttachmentReaderSource::handleSeekData(guint64 offset) {
