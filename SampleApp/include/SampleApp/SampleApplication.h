@@ -72,7 +72,8 @@ public:
         std::shared_ptr<alexaClientSDK::sampleApp::ConsoleReader> consoleReader,
         const std::vector<std::string>& configFiles,
         const std::string& pathToInputFolder,
-        const std::string& logLevel = "");
+        const std::string& logLevel = "",
+        const std::string& disableStdin = "");
 
     /**
      * Runs the application, blocking until the user asks the application to quit or a device reset is triggered.
@@ -147,7 +148,8 @@ private:
         std::shared_ptr<alexaClientSDK::sampleApp::ConsoleReader> consoleReader,
         const std::vector<std::string>& configFiles,
         const std::string& pathToInputFolder,
-        const std::string& logLevel);
+        const std::string& logLevel),
+        const std::string& disableStdin);
 
     /**
      * Create an application media player.
@@ -242,6 +244,8 @@ private:
     /// Iniitalizer object to reload PulseAudio Bluetooth modules.
     std::shared_ptr<bluetoothImplementations::blueZ::PulseAudioBluetoothInitializer> m_pulseAudioInitializer;
 #endif
+
+    bool m_disableStdin;
 };
 
 }  // namespace sampleApp
