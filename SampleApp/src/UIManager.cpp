@@ -1001,8 +1001,8 @@ void UIManager::sendDbusSignal(const std::string signalName)
     ACSDK_LOG(alexaClientSDK::avsCommon::utils::logger::Level::INFO, LX("DBusSignal").d("signalName", signalName));
 
     // create a signal & check for errors
-    msg = dbus_message_new_signal("/io/respeaker/respeakerd", // object name of the signal
-                                  "respeakerd.signal", // interface name of the signal
+    msg = dbus_message_new_signal("/io/shivasiddharth/alexamsg", // object name of the signal
+                                  "alexamsg.signal", // interface name of the signal
                                   signalName.c_str()); // name of the signal
     if (!msg) {
         ACSDK_ERROR(LX("DBusFailed").d("reason", "create message failed"));

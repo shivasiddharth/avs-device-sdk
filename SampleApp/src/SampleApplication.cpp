@@ -164,6 +164,8 @@ static const std::string ENDPOINT_KEY("endpoint");
 /// Key for setting if display cards are supported or not under the @c SAMPLE_APP_CONFIG_KEY configuration node.
 static const std::string DISPLAY_CARD_KEY("displayCardsSupported");
 
+static const std::string DISABLE_STDIN_KEY("disableStdin");
+
 /// Key for the Audio MediaPlayer pool size.
 static const std::string AUDIO_MEDIAPLAYER_POOL_SIZE_KEY("audioMediaPlayerPoolSize");
 
@@ -291,9 +293,10 @@ std::unique_ptr<SampleApplication> SampleApplication::create(
     std::shared_ptr<alexaClientSDK::sampleApp::ConsoleReader> consoleReader,
     const std::vector<std::string>& configFiles,
     const std::string& pathToInputFolder,
-    const std::string& logLevel) {
+    const std::string& logLevel,
+    const std::string& disableStdin) {
     auto clientApplication = std::unique_ptr<SampleApplication>(new SampleApplication);
-    if (!clientApplication->initialize(consoleReader, configFiles, pathToInputFolder, logLevel)) {
+    if (!clientApplication->initialize(consoleReader, configFiles, pathToInputFolder, logLevel, disableStdin)) {
         ACSDK_CRITICAL(LX("Failed to initialize SampleApplication"));
         return nullptr;
     }
@@ -326,7 +329,13 @@ SampleApplication::MediaPlayerRegistration::MediaPlayerRegistration(
 }
 
 SampleAppReturnCode SampleApplication::run() {
-    return m_userInputManager->run();
+    if (m_disableStdin) {
+        while (true) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    } else {
+        return m_userInputManager->run();
+    }
 }
 
 SampleApplication::~SampleApplication() {
@@ -415,7 +424,8 @@ bool SampleApplication::initialize(
     std::shared_ptr<alexaClientSDK::sampleApp::ConsoleReader> consoleReader,
     const std::vector<std::string>& configFiles,
     const std::string& pathToInputFolder,
-    const std::string& logLevel) {
+    const std::string& logLevel,
+    const std::string& disableStdin) {
     /*
      * Set up the SDK logging system to write to the SampleApp's ConsolePrinter.  Also adjust the logging level
      * if requested.
@@ -1317,6 +1327,17 @@ bool SampleApplication::initialize(
 #endif
 
     client->addAlexaDialogStateObserver(m_interactionManager);
+    sampleAppConfig.getBool(DISABLE_STDIN_KEY, &m_disableStdin, false);
+
+    if (disableStdin.find(DISABLE_STDIN_KEY) != std::string::npos) {
+        m_disableStdin = true;
+    }
+
+    if (m_disableStdin) {
+        alexaClientSDK::sampleApp::ConsolePrinter::simplePrint("run without stdin.");
+        return true;
+    }
+
     client->addCallStateObserver(m_interactionManager);
 
 #ifdef ENABLE_REVOKE_AUTH
