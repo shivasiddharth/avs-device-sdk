@@ -16,7 +16,7 @@
 #ifndef ALEXA_CLIENT_SDK_AVSCOMMON_UTILS_INCLUDE_AVSCOMMON_UTILS_BLUETOOTH_FORMATTEDAUDIOSTREAMADAPTERLISTENER_H_
 #define ALEXA_CLIENT_SDK_AVSCOMMON_UTILS_INCLUDE_AVSCOMMON_UTILS_BLUETOOTH_FORMATTEDAUDIOSTREAMADAPTERLISTENER_H_
 
-#include <AVSCommon/Utils/AudioFormat.h>
+#include "AVSCommon/Utils/AudioFormat.h"
 
 namespace alexaClientSDK {
 namespace avsCommon {
@@ -38,6 +38,11 @@ public:
         avsCommon::utils::AudioFormat audioFormat,
         const unsigned char* buffer,
         size_t size) = 0;
+
+    /**
+     * Destructor.
+     */
+    virtual ~FormattedAudioStreamAdapterListener() = default;
 };
 
 }  // namespace bluetooth

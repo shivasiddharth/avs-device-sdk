@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * Copyright 2017-2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License").
  * You may not use this file except in compliance with the License.
@@ -23,6 +23,12 @@
 
 #include "AVSCommon/AVS/Attachment/AttachmentReader.h"
 #include "AVSCommon/Utils/AudioFormat.h"
+#include "AVSCommon/Utils/Optional.h"
+#include "AVSCommon/Utils/MediaPlayer/MediaPlayerState.h"
+#include "AVSCommon/Utils/MediaPlayer/PlaybackAttributes.h"
+#include "AVSCommon/Utils/MediaPlayer/PlaybackReport.h"
+#include "AVSCommon/Utils/MediaPlayer/SourceConfig.h"
+#include "AVSCommon/Utils/Optional.h"
 
 namespace alexaClientSDK {
 namespace avsCommon {
@@ -39,25 +45,24 @@ class MediaPlayerObserverInterface;
  * A @c MediaPlayerInterface allows for sourcing, playback control, navigation, and querying the state of media content.
  * A @c MediaPlayerInterface implementation must only handle one source at a time.
  *
- * Each playback controlling API call (i.e. @c play(), @c pause(), @c stop(),  @c resume()) which returns @c true will
- * result in a callback to the observer. If @c false is returned from these calls, no callback will occur. Callbacks
- * should not be made on the caller's thread prior to returning from a call.
+ * Each playback controlling API call (i.e. @c play(), @c pause(), @c stop(),  @c resume()) that succeeds will also
+ * result in a callback to the observer. To see how to tell when a method succeeded, please refer to the documentation
+ * of each method.
  *
  * An implementation can call @c onPlaybackError() at any time.  If an @c onPlaybackError() callback occurs while a
  * plaback controlling API call is waiting for a callback, the original callback must not be made, and the
- * implementation should rever to a stopped state.  Any subsequent operations after an @c onPlaybackError() callback
+ * implementation should revert to a stopped state.  Any subsequent operations after an @c onPlaybackError() callback
  * must be preceded by a new @c setSource() call.
  *
  * Implementations must make a call to @c onPlaybackStopped() with the previous @c SourceId when a new source is
- * set if the previous source was in a non-stopped state. Any calls to a @c MediaPlayerInterface after an @c
- * onPlaybackStopped() call will fail, as the MediaPlayer has "reset" its state.
+ * set if the previous source was in a non-stopped state.
  *
  * @c note A @c MediaPlayerInterface implementation must be able to support the various audio formats listed at:
- * https://developer.amazon.com/docs/alexa-voice-service/recommended-media-support.html.
+ * https://developer.amazon.com/docs/alexa/alexa-voice-service/recommended-media-support.html.
  */
 class MediaPlayerInterface {
 public:
-    /// A type that identifies which source is currently being operated on.
+    /// A type that identifies which source is currently being operated on.  This must be unique across all instances.
     using SourceId = uint64_t;
 
     /// An @c SourceId used to represent an error from calls to @c setSource().
@@ -74,15 +79,19 @@ public:
      *
      * @note A @c MediaPlayerInterface implementation must handle only one source at a time. An implementation must call
      * @c MediaPlayerObserverInterface::onPlaybackStopped() with the previous source's id if there was a source set.
+     * Also, an implementation must call @c MediaPlayerObserverInterface::onBufferingComplete() when this source has
+     * been fully buffered
      *
      * @param attachmentReader Object with which to read an incoming audio attachment.
      * @param format The audioFormat to be used to interpret raw audio data.
+     * @param config Media configuration of source.
      * @return The @c SourceId that represents the source being handled as a result of this call. @c ERROR will be
-     *     returned if the source failed to be set.
+     *     returned if the source failed to be set.  Must be unique across all instances.
      */
     virtual SourceId setSource(
         std::shared_ptr<avsCommon::avs::attachment::AttachmentReader> attachmentReader,
-        const avsCommon::utils::AudioFormat* format = nullptr) = 0;
+        const avsCommon::utils::AudioFormat* format = nullptr,
+        const SourceConfig& config = emptySourceConfig()) = 0;
 
     /**
      * Set a url source to play. The source should be set before making calls to any of the playback control APIs. If
@@ -90,16 +99,22 @@ public:
      *
      * @note A @c MediaPlayerInterface implementation must handle only one source at a time. An implementation must call
      * @c MediaPlayerObserverInterface::onPlaybackStopped() with the previous source's id if there was a source set.
+     * Also, an implementation must call @c MediaPlayerObserverInterface::onBufferingComplete() when this source has
+     * been fully buffered
      *
      * @param url The url to set as the source.
      * @param offset An optional offset parameter to start playing from when a @c play() call is made.
+     * @param config Media configuration of source.
+     * @param repeat An optional parameter to play the url source in a loop.
      *
      * @return The @c SourceId that represents the source being handled as a result of this call. @c ERROR will be
-     *     returned if the source failed to be set.
+     *     returned if the source failed to be set.  Must be unique across all instances.
      */
     virtual SourceId setSource(
         const std::string& url,
-        std::chrono::milliseconds offset = std::chrono::milliseconds::zero()) = 0;
+        std::chrono::milliseconds offset = std::chrono::milliseconds::zero(),
+        const SourceConfig& config = emptySourceConfig(),
+        bool repeat = false) = 0;
 
     /**
      * Set an @c istream source to play. The source should be set before making calls to any of the playback control
@@ -107,14 +122,20 @@ public:
      *
      * @note A @c MediaPlayerInterface implementation must handle only one source at a time. An implementation must call
      * @c MediaPlayerObserverInterface::onPlaybackStopped() with the previous source's id if there was a source set.
+     * Also, an implementation must call @c MediaPlayerObserverInterface::onBufferingComplete() when this source has
+     * been fully buffered
      *
      * @param stream Object from which to read an incoming audio stream.
      * @param repeat Whether the audio stream should be played in a loop until stopped.
+     * @param config Media configuration of source.
      *
      * @return The @c SourceId that represents the source being handled as a result of this call. @c ERROR will be
-     * returned if the source failed to be set.
+     * returned if the source failed to be set.  Must be unique across all instances.
      */
-    virtual SourceId setSource(std::shared_ptr<std::istream> stream, bool repeat) = 0;
+    virtual SourceId setSource(
+        std::shared_ptr<std::istream> stream,
+        bool repeat = false,
+        const SourceConfig& config = emptySourceConfig()) = 0;
 
     /**
      * Starts playing audio specified by the @c setSource() call.
@@ -132,7 +153,7 @@ public:
      * When @c true is returned, a callback will be made to either @c MediaPlayerObserverInterface::onPlaybackStarted()
      * or to @c MediaPlayerObserverInterface::onPlaybackError().
      *
-     * @param id The id of the source on which to operate.
+     * @param id The unique id of the source on which to operate.
      *
      * @return @c true if the call succeeded, in which case a callback will be made, or @c false otherwise.
      */
@@ -150,7 +171,7 @@ public:
      * When @c true is returned, a callback will be made to either @c MediaPlayerObserverInterface::onPlaybackStopped()
      * or to @c MediaPlayerObserverInterface::onPlaybackError().
      *
-     * @param id The id of the source on which to operate.
+     * @param id The unique id of the source on which to operate.
      *
      * @return @c true if the call succeeded, in which case a callback will be made, or @c false otherwise.
      */
@@ -175,7 +196,7 @@ public:
      * When @c true is returned, a callback will be made to either @c MediaPlayerObserverInterface::onPlaybackPaused()
      * or to @c MediaPlayerObserverInterface::onPlaybackError().
      *
-     * @param id The id of the source on which to operate.
+     * @param id The unique id of the source on which to operate.
      *
      * @return @c true if the call succeeded, in which case a callback will be made, or @c false otherwise.
      */
@@ -197,7 +218,7 @@ public:
      * When @c true is returned, a callback will be made to either @c MediaPlayerObserverInterface::onPlaybackResumed()
      * or to @c MediaPlayerObserverInterface::onPlaybackError().
      *
-     * @param id The id of the source on which to operate.
+     * @param id The unique id of the source on which to operate.
      *
      * @return @c true if the call succeeded, in which case a callback will be made, or @c false otherwise.
      */
@@ -206,10 +227,12 @@ public:
     /**
      * Returns the offset, in milliseconds, of the media source.
      *
-     * @param id The id of the source on which to operate.
+     * @param id The unique id of the source on which to operate.
      *
      * @return If the specified source is playing, the offset in milliseconds that the source has been playing
      *      will be returned. If the specified source is not playing, the last offset it played will be returned.
+     *
+     * @deprecated Use @c getMediaPlayerState instead, which contains the offset
      */
     virtual std::chrono::milliseconds getOffset(SourceId id) = 0;
 
@@ -221,13 +244,58 @@ public:
     virtual uint64_t getNumBytesBuffered() = 0;
 
     /**
-     * Sets an observer to be notified when playback state changes.
+     * Returns the current state of the media player source, including
+     * the id and offset.
+     *
+     * @param id The unique id of the source for the desired state.
+     *
+     * @return Optional state including the offset. A blank Optional is returned
+     *         if retrieving this information fails.
+     */
+    virtual utils::Optional<avsCommon::utils::mediaPlayer::MediaPlayerState> getMediaPlayerState(SourceId id) = 0;
+
+    /**
+     * Adds an observer to be notified when playback state changes.
      *
      * @param playerObserver The observer to send the notifications to.
      */
-    virtual void setObserver(
+    virtual void addObserver(
         std::shared_ptr<avsCommon::utils::mediaPlayer::MediaPlayerObserverInterface> playerObserver) = 0;
+
+    /**
+     * Removes an observer to be notified when playback state changes.
+     *
+     * @param playerObserver The observer to be removed
+     */
+    virtual void removeObserver(
+        std::shared_ptr<avsCommon::utils::mediaPlayer::MediaPlayerObserverInterface> playerObserver) = 0;
+
+    /**
+     * Get @c PlaybackAttributes for the current stream being played.
+     * This method only needs to be implemented if your mediaplayer supports Premium Audio.
+     *
+     * @return playbackAttributes The playback attributes for the current stream if premium audio is supported
+     *      and it has an active source; otherwise, an empty object.
+     */
+    virtual utils::Optional<PlaybackAttributes> getPlaybackAttributes();
+
+    /**
+     * Get list of @c PlaybackReports for current track.
+     * This method only needs to be implemented if your mediaplayer supports Premium Audio.
+     *
+     * @return The list of @c PlaybackReport for current track if premium audio is supported and it has an
+     *      active source; otherwise, an empty list.
+     */
+    virtual std::vector<PlaybackReport> getPlaybackReports();
 };
+
+inline utils::Optional<PlaybackAttributes> MediaPlayerInterface::getPlaybackAttributes() {
+    return utils::Optional<PlaybackAttributes>();
+}
+
+inline std::vector<PlaybackReport> MediaPlayerInterface::getPlaybackReports() {
+    return {};
+}
 
 }  // namespace mediaPlayer
 }  // namespace utils

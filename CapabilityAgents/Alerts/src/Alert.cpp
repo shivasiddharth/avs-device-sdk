@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * Copyright 2017-2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License").
  * You may not use this file except in compliance with the License.
@@ -13,6 +13,7 @@
  * permissions and limitations under the License.
  */
 
+#include "Alerts/Alarm.h"
 #include "Alerts/Alert.h"
 
 #include <AVSCommon/AVS/FocusState.h>
@@ -76,13 +77,15 @@ static const std::string TAG("Alert");
 
 Alert::Alert(
     std::function<std::unique_ptr<std::istream>()> defaultAudioFactory,
-    std::function<std::unique_ptr<std::istream>()> shortAudioFactory) :
+    std::function<std::unique_ptr<std::istream>()> shortAudioFactory,
+    std::shared_ptr<settings::DeviceSettingsManager> settingsManager) :
         m_stopReason{StopReason::UNSET},
         m_focusState{avsCommon::avs::FocusState::NONE},
         m_hasTimerExpired{false},
         m_observer{nullptr},
         m_defaultAudioFactory{defaultAudioFactory},
-        m_shortAudioFactory{shortAudioFactory} {
+        m_shortAudioFactory{shortAudioFactory},
+        m_settingsManager{settingsManager} {
 }
 
 /**
@@ -246,8 +249,7 @@ void Alert::setObserver(AlertObserverInterface* observer) {
 }
 
 void Alert::setFocusState(FocusState focusState) {
-    std::unique_lock<std::mutex> lock(m_mutex);
-    auto rendererCopy = m_renderer;
+    std::lock_guard<std::mutex> lock(m_mutex);
     auto alertState = m_dynamicData.state;
 
     if (focusState == m_focusState) {
@@ -256,11 +258,9 @@ void Alert::setFocusState(FocusState focusState) {
 
     m_focusState = focusState;
 
-    lock.unlock();
-
     if (State::ACTIVE == alertState) {
-        rendererCopy->stop();
-        startRenderer();
+        m_renderer->stop();
+        startRendererLocked();
     }
 }
 
@@ -299,23 +299,17 @@ void Alert::activate() {
         }
     }
 
-    lock.unlock();
-
-    startRenderer();
+    startRendererLocked();
 }
 
 void Alert::deactivate(StopReason reason) {
     ACSDK_DEBUG9(LX("deactivate").d("reason", reason));
-    std::unique_lock<std::mutex> lock(m_mutex);
-    auto rendererCopy = m_renderer;
+    std::lock_guard<std::mutex> lock(m_mutex);
 
     m_dynamicData.state = Alert::State::STOPPING;
     m_stopReason = reason;
     m_maxLengthTimer.stop();
-
-    lock.unlock();
-
-    rendererCopy->stop();
+    m_renderer->stop();
 }
 
 void Alert::getAlertData(StaticData* staticData, DynamicData* dynamicData) const {
@@ -334,6 +328,46 @@ void Alert::getAlertData(StaticData* staticData, DynamicData* dynamicData) const
     }
 }
 
+/**
+ * Checks if the assets map contains a certain key and that the object mapped by the key is valid.
+ *
+ * @param key The key to search in the assets map
+ * @param assets The assets map
+ * @return @c true if the key was found in the assets, if the asset's id is the same as the key and asset url is not
+ * empty
+ */
+static bool hasAsset(const std::string& key, const std::unordered_map<std::string, Alert::Asset>& assets) {
+    auto search = assets.find(key);
+    return (search != assets.end()) && (search->second.id == key) && (!search->second.url.empty());
+}
+
+/**
+ * Validates the static data
+ *
+ * @param staticData Static data struct to validate
+ * @return @c true if the data is valid
+ */
+static bool validateStaticData(const Alert::StaticData& staticData) {
+    if (!staticData.assetConfiguration.backgroundAssetId.empty() &&
+        !hasAsset(staticData.assetConfiguration.backgroundAssetId, staticData.assetConfiguration.assets)) {
+        ACSDK_ERROR(LX("validateStaticDataFailed")
+                        .d("reason", "invalidStaticData")
+                        .d("assetId", staticData.assetConfiguration.backgroundAssetId)
+                        .m("backgroundAssetId is not represented in the list of assets"));
+        return false;
+    }
+    for (std::string const& a : staticData.assetConfiguration.assetPlayOrderItems) {
+        if (!hasAsset(a, staticData.assetConfiguration.assets)) {
+            ACSDK_ERROR(LX("validateStaticDataFailed")
+                            .d("reason", "invalidStaticData")
+                            .d("assetId", a)
+                            .m("Asset ID on assetPlayOrderItems is not represented in the list of assets"));
+            return false;
+        }
+    }
+    return true;
+}
+
 bool Alert::setAlertData(StaticData* staticData, DynamicData* dynamicData) {
     std::lock_guard<std::mutex> lock(m_mutex);
     if (!dynamicData && !staticData) {
@@ -341,6 +375,10 @@ bool Alert::setAlertData(StaticData* staticData, DynamicData* dynamicData) {
     }
 
     if (staticData) {
+        if (!validateStaticData(*staticData)) {
+            ACSDK_ERROR(LX("setAlertDataFailed").d("reason", "validateStaticDataFailed"));
+            return false;
+        }
         m_staticData = *staticData;
     }
 
@@ -429,7 +467,7 @@ void Alert::onRendererStateChange(RendererObserverInterface::State state, const 
     lock.unlock();
 
     if (shouldNotifyObserver && observerCopy) {
-        observerCopy->onAlertStateChange(m_staticData.token, notifyState, notifyReason);
+        observerCopy->onAlertStateChange(m_staticData.token, getTypeName(), notifyState, notifyReason);
     }
 
     if (shouldRetryRendering) {
@@ -465,19 +503,37 @@ int Alert::getId() const {
     return m_staticData.dbId;
 }
 
-void Alert::snooze(const std::string& updatedScheduledTime_ISO_8601) {
-    std::unique_lock<std::mutex> lock(m_mutex);
-    auto rendererCopy = m_renderer;
+bool Alert::updateScheduledTime(const std::string& newScheduledTime) {
+    std::lock_guard<std::mutex> lock(m_mutex);
 
-    if (!m_dynamicData.timePoint.setTime_ISO_8601(updatedScheduledTime_ISO_8601)) {
-        ACSDK_ERROR(LX("snoozeFailed").m("could not convert time string").d("value", updatedScheduledTime_ISO_8601));
-        return;
+    const auto state = m_dynamicData.state;
+    if (State::ACTIVE == state || State::ACTIVATING == state || State::STOPPING == state) {
+        ACSDK_ERROR(LX("updateScheduledTimeFailed").d("reason", "unexpectedState").d("state", m_dynamicData.state));
+        return false;
+    }
+
+    if (!m_dynamicData.timePoint.setTime_ISO_8601(newScheduledTime)) {
+        ACSDK_ERROR(LX("updateScheduledTimeFailed").d("reason", "setTimeFailed").d("newTime", newScheduledTime));
+        return false;
+    }
+
+    m_dynamicData.state = State::SET;
+
+    return true;
+}
+
+bool Alert::snooze(const std::string& updatedScheduledTime) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+
+    if (!m_dynamicData.timePoint.setTime_ISO_8601(updatedScheduledTime)) {
+        ACSDK_ERROR(LX("snoozeFailed").d("reason", "setTimeFailed").d("updatedScheduledTime", updatedScheduledTime));
+        return false;
     }
 
     m_dynamicData.state = State::SNOOZING;
-    lock.unlock();
 
-    rendererCopy->stop();
+    m_renderer->stop();
+    return true;
 }
 
 Alert::StopReason Alert::getStopReason() const {
@@ -506,16 +562,20 @@ Alert::AssetConfiguration Alert::getAssetConfiguration() const {
 }
 
 void Alert::startRenderer() {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    startRendererLocked();
+}
+
+void Alert::startRendererLocked() {
     ACSDK_DEBUG9(LX("startRenderer"));
     std::vector<std::string> urls;
 
-    std::unique_lock<std::mutex> lock(m_mutex);
-    auto rendererCopy = m_renderer;
     auto loopCount = m_dynamicData.loopCount;
     auto loopPause = m_staticData.assetConfiguration.loopPause;
+    bool startWithPause = false;
 
     // If there are no assets to play (due to the alert not providing any assets), or there was a previous error
-    // (indicated by m_staticData.assetConfiguration.hasRenderingFailed), we call rendererCopy->start(..) with an
+    // (indicated by m_staticData.assetConfiguration.hasRenderingFailed), we call m_renderer->start(..) with an
     // empty vector of urls.  This causes the default audio to be rendered.
     auto audioFactory = getDefaultAudioFactory();
     if (avsCommon::avs::FocusState::BACKGROUND == m_focusState) {
@@ -525,6 +585,9 @@ void Alert::startRenderer() {
                 m_staticData.assetConfiguration.assets[m_staticData.assetConfiguration.backgroundAssetId].url);
         }
         loopPause = BACKGROUND_ALERT_SOUND_PAUSE_TIME;
+        if (State::ACTIVATING != m_dynamicData.state) {
+            startWithPause = true;
+        }
     } else if (!m_staticData.assetConfiguration.assets.empty() && !m_dynamicData.hasRenderingFailed) {
         // Only play the named timer urls when it's in foreground.
         for (auto item : m_staticData.assetConfiguration.assetPlayOrderItems) {
@@ -532,22 +595,28 @@ void Alert::startRenderer() {
         }
     }
 
-    lock.unlock();
+    auto alarmVolumeRampEnabled = false;
+    if (m_settingsManager) {
+        // When Alert starts, check the current volume ramp setting so the alert renders with the most current setting
+        auto alarmVolumeRampSetting = m_settingsManager
+                                          ->getValue<settings::DeviceSettingsIndex::ALARM_VOLUME_RAMP>(
+                                              settings::types::getAlarmVolumeRampDefault())
+                                          .second;
+        alarmVolumeRampEnabled =
+            settings::types::isEnabled(alarmVolumeRampSetting) && (getTypeName() == Alarm::getTypeNameStatic());
+    }
 
-    rendererCopy->setObserver(shared_from_this());
-    rendererCopy->start(audioFactory, urls, loopCount, loopPause);
+    m_renderer->start(
+        shared_from_this(), audioFactory, alarmVolumeRampEnabled, urls, loopCount, loopPause, startWithPause);
 }
 
 void Alert::onMaxTimerExpiration() {
     ACSDK_DEBUG1(LX("onMaxTimerExpiration"));
-    std::unique_lock<std::mutex> lock(m_mutex);
-    auto rendererCopy = m_renderer;
+    std::lock_guard<std::mutex> lock(m_mutex);
     m_dynamicData.state = Alert::State::STOPPING;
     m_hasTimerExpired = true;
 
-    lock.unlock();
-
-    rendererCopy->stop();
+    m_renderer->stop();
 }
 
 bool Alert::isPastDue(int64_t currentUnixTime, std::chrono::seconds timeLimit) {

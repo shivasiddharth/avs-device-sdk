@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * Copyright 2017-2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License").
  * You may not use this file except in compliance with the License.
@@ -48,7 +48,11 @@ public:
         /// The alert has entered the background.
         FOCUS_ENTERED_BACKGROUND,
         /// The alert has encountered an error.
-        ERROR
+        ERROR,
+        /// The alert has been deleted.
+        DELETED,
+        /// The alert has been scheduled to trigger at a future time.
+        SCHEDULED_FOR_LATER
     };
 
     /**
@@ -60,10 +64,15 @@ public:
      * A callback function to notify an object that an alert has updated its state.
      *
      * @param alertToken The AVS token of the alert.
+     * @param alertType The type of the alert.
      * @param state The state of the alert.
      * @param reason The reason for the state change.
      */
-    virtual void onAlertStateChange(const std::string& alertToken, State state, const std::string& reason = "") = 0;
+    virtual void onAlertStateChange(
+        const std::string& alertToken,
+        const std::string& alertType,
+        State state,
+        const std::string& reason = "") = 0;
 
     /**
      * Convert a @c State to a @c std::string.
@@ -94,6 +103,10 @@ inline std::string AlertObserverInterface::stateToString(State state) {
             return "FOCUS_ENTERED_BACKGROUND";
         case State::ERROR:
             return "ERROR";
+        case State::DELETED:
+            return "DELETED";
+        case State::SCHEDULED_FOR_LATER:
+            return "SCHEDULED_FOR_LATER";
     }
     return "unknown State";
 }

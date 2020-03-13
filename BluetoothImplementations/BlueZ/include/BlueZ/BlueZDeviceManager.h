@@ -1,5 +1,5 @@
 /*
- * Copyright 2018 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * Copyright 2018-2019 Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License").
  * You may not use this file except in compliance with the License.
@@ -27,10 +27,10 @@
 #include <AVSCommon/Utils/Bluetooth/BluetoothEventBus.h>
 #include <AVSCommon/Utils/Bluetooth/BluetoothEvents.h>
 #include <AVSCommon/Utils/RequiresShutdown.h>
-#include <AVSCommon/Utils/Threading/Executor.h>
 
 #include "BlueZ/BlueZHostController.h"
 #include "BlueZ/BlueZUtils.h"
+#include "BlueZ/MPRISPlayer.h"
 #include "BlueZ/PairingAgent.h"
 
 #include <gio/gio.h>
@@ -70,20 +70,13 @@ public:
     std::shared_ptr<avsCommon::sdkInterfaces::bluetooth::BluetoothHostControllerInterface> getHostController() override;
     std::list<std::shared_ptr<avsCommon::sdkInterfaces::bluetooth::BluetoothDeviceInterface>> getDiscoveredDevices()
         override;
-
+    std::shared_ptr<avsCommon::utils::bluetooth::BluetoothEventBus> getEventBus() override;
     ///@}
 
     // @name RequiresShutdown Functions
     /// @{
     void doShutdown() override;
     /// @}
-
-    /**
-     * Get the @c BluetoothEventBus used by this device manager to post bluetooth related events.
-     *
-     * @return A @c BluetoothEventBus object associated with the device manager.
-     */
-    std::shared_ptr<avsCommon::utils::bluetooth::BluetoothEventBus> getEventBus();
 
     /**
      * Get the SINK @c MediaEndpoint associated with the device manager
@@ -98,6 +91,12 @@ public:
      * @return DBus object path of the current bluetooth hardware adapter used by this device manager.
      */
     std::string getAdapterPath() const;
+
+    /**
+     * Get the current media streaming state.
+     * @return @c MediaStreamingState
+     */
+    avsCommon::utils::bluetooth::MediaStreamingState getMediaStreamingState();
 
 private:
     /**
@@ -310,6 +309,9 @@ private:
 
     /// Pairing agent used for device pairing.
     std::shared_ptr<PairingAgent> m_pairingAgent;
+
+    /// DBus MediaPlayer used for AVRCPTarget.
+    std::shared_ptr<MPRISPlayer> m_mediaPlayer;
 
     /// The EventBus to communicate with SDK components.
     std::shared_ptr<avsCommon::utils::bluetooth::BluetoothEventBus> m_eventBus;
