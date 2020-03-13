@@ -249,7 +249,6 @@ SampleAppReturnCode UserInputManager::run() {
         if (!readConsoleInput(&x)) {
             break;
         }
-        std::cout << "cin: " << (int)x << std::endl;
         x = ::tolower(x);
         if (x == QUIT) {
             break;
