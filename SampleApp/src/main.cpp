@@ -51,7 +51,6 @@ int main(int argc, char* argv[]) {
     std::vector<std::string> configFiles;
     std::string pathToKWDInputFolder;
     std::string logLevel;
-    std::string disableStdin;
 
     if (usesOptStyleArgs(argc, argv)) {
         for (int i = 1; i < argc; i++) {
@@ -97,14 +96,11 @@ int main(int argc, char* argv[]) {
 #else
         if (argc < 2) {
             ConsolePrinter::simplePrint(
-                "USAGE: " + std::string(argv[0]) + " <path_to_AlexaClientSDKConfig.json> [log_level] [disableStdin]");
+                "USAGE: " + std::string(argv[0]) + " <path_to_AlexaClientSDKConfig.json> [log_level]");
             return SampleAppReturnCode::ERROR;
         }
-        if (3 <= argc) {
+        if (3 == argc) {
             logLevel = std::string(argv[2]);
-        }
-        if (4 <= argc) {
-        disableStdin = std::string(argv[3]);
         }
 #endif
 
@@ -118,7 +114,7 @@ int main(int argc, char* argv[]) {
     SampleAppReturnCode returnCode = SampleAppReturnCode::OK;
 
     do {
-        sampleApplication = SampleApplication::create(consoleReader, configFiles, pathToKWDInputFolder, logLevel, disableStdin);
+        sampleApplication = SampleApplication::create(consoleReader, configFiles, pathToKWDInputFolder, logLevel);
         if (!sampleApplication) {
             ConsolePrinter::simplePrint("Failed to create to SampleApplication!");
             return SampleAppReturnCode::ERROR;
