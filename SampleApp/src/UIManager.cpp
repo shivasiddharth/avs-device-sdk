@@ -1,5 +1,5 @@
 /*
- * Copyright 2017-2020 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ * Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
  *
  * Licensed under the Apache License, Version 2.0 (the "License").
  * You may not use this file except in compliance with the License.
@@ -18,8 +18,6 @@
 
 #include "SampleApp/UIManager.h"
 
-#include <AVSCommon/Utils/Logger/Logger.h>
-
 #include <AVSCommon/SDKInterfaces/DialogUXStateObserverInterface.h>
 #include <AVSCommon/Utils/Logger/Logger.h>
 #include <AVSCommon/Utils/JSON/JSONUtils.h>
@@ -29,7 +27,6 @@
 #include <Settings/WakeWordConfirmationSettingType.h>
 
 #include "SampleApp/ConsolePrinter.h"
-#include "Settings/SettingStringConversion.h"
 
 /// String to identify log entries originating from this file.
 static const std::string TAG("UIManager");
@@ -47,15 +44,6 @@ namespace sampleApp {
 using namespace avsCommon::sdkInterfaces;
 using namespace avsCommon::utils;
 using namespace settings;
-
-static const std::string TAG("UIManager");
-
-/**
- * Create a LogEntry using this file's TAG and the specified event string.
- *
- * @param The event string for this @c LogEntry.
- */
-#define LX(event) alexaClientSDK::avsCommon::utils::logger::LogEntry(TAG, event)
 
 static const std::string VERSION = avsCommon::utils::sdkVersion::getCurrentVersion();
 
@@ -76,7 +64,15 @@ static const std::string ALEXA_WELCOME_MESSAGE =
     "            # ###### #    # #####  #      #         ####### #####  #####      \n"
     "      #     # #    # #    # #      #      #         #     # #      #          \n"
     "       #####  #    # #    # #      ###### ######    #     # #      #          \n\n"
-    "       SDK Version " + VERSION + "\n";
+    "       SDK Version " + VERSION + "\n\n"
+#ifdef DEBUG_BUILD_TYPE
+    "       WARNING! THIS DEVICE HAS BEEN COMPILED IN DEBUG MODE.\n\n"
+    "       RELEASING A PRODUCTION DEVICE IN DEBUG MODE MAY IMPACT DEVICE PERFORMANCE,\n"
+    "       DOES NOT COMPLY WITH THE AVS SECURITY REQUIREMENTS,\n"
+    "       AND COULD RESULT IN SUSPENSION OR TERMINATION OF THE ALEXA SERVICE ON YOUR DEVICES.\n\n"
+#endif
+;
+
 // clang-format on
 static const std::string HELP_MESSAGE =
     "+----------------------------------------------------------------------------+\n"
@@ -137,6 +133,12 @@ static const std::string HELP_MESSAGE =
     "|       Press 'z' followed by Enter at any time to re-authorize your device. |\n"
     "|       This will erase any data stored in the device and initiate           |\n"
     "|       re-authorization.                                                    |\n"
+#ifdef DIAGNOSTICS
+    "| Diagnostics:                                                               |\n"
+    "|       Press 'o' followed by Enter at any time to enter the diagnostics     |\n"
+    "|       screen.                                                              |\n"
+#endif
+    "|                                                                            |\n"
     "| Quit:                                                                      |\n"
     "|       Press 'q' followed by Enter at any time to quit the application.     |\n"
     "+----------------------------------------------------------------------------+\n";
@@ -144,6 +146,11 @@ static const std::string HELP_MESSAGE =
 static const std::string LIMITED_HELP_HEADER =
     "+----------------------------------------------------------------------------+\n"
     "|                          In Limited Mode:                                  |\n"
+    "+----------------------------------------------------------------------------+\n";
+
+static const std::string AUDIO_INJECTION_HEADER =
+    "+----------------------------------------------------------------------------+\n"
+    "|Diagnostic audio injection has been ENABLED. Audio recording is UNAVAILABLE.|\n"
     "+----------------------------------------------------------------------------+\n";
 
 static const std::string AUTH_FAILED_STR =
@@ -469,6 +476,70 @@ static const std::initializer_list<std::string> NETWORK_INFO_STATIC_IP_PROMPT = 
     "Press '2' followed by Enter to set the ip type to dynamic",
     "Press '3' followed by Enter to reset the ip type."};
 
+static const std::string DIAGNOSTICS_SCREEN =
+    "+----------------------------------------------------------------------------+\n"
+    "|                 Diagnostics Options:                                       |\n"
+    "|                                                                            |\n"
+#ifdef DEVICE_PROPERTIES
+    "| Press 'p' followed by Enter to go to the device properties screen.         |\n"
+#endif
+#ifdef AUDIO_INJECTION
+    "| Press 'a' followed by Enter to go to the audio injection screen.           |\n"
+#endif
+#ifdef PROTOCOL_TRACE
+    "| Press 't' followed by Enter to go to the device protocol trace screen.     |\n"
+#endif
+    "|                                                                            |\n"
+    "| Press 'i' followed by Enter for help.                                      |\n"
+    "| Press 'q' followed by Enter to go to the previous screen.                  |\n"
+    "+----------------------------------------------------------------------------+\n";
+
+static const std::string AUDIO_INJECTION_SCREEN =
+    "+------------------------------------------------------------------------------+\n"
+    "|                            Audio Injection Screen:                           |\n"
+    "|                                                                              |\n"
+    "| This diagnostic allows for injecting audio from wav files directly into the  |\n"
+    "| microphone. Note input wav files should conform to the following:            |\n"
+    "|                                                                              |\n"
+    "| Sample Size : 16 bytes                                                       |\n"
+    "| Sample Rate : 16Khz                                                          |\n"
+    "| Number of channels : 1                                                       |\n"
+    "| Endianness : Little                                                          |\n"
+    "| Encoding Format : LPCM                                                       |\n"
+    "|                                                                              |\n"
+    "| Press '1' followed by Enter to go into input mode. Once inside input mode,   |\n"
+    "| enter the absolute path of the wav file to inject audio from wav file.       |\n"
+    "|                                                                              |\n"
+    "| Press 'i' followed by Enter for help.                                        |\n"
+    "| Press 'q' followed by Enter to go to the previous screen.                    |\n"
+    "+------------------------------------------------------------------------------+\n";
+
+static const std::string DEVICE_PROTOCOL_TRACE_SCREEN =
+    "+----------------------------------------------------------------------------+\n"
+    "|                 Device Protocol Trace Screen:                              |\n"
+    "|                                                                            |\n"
+    "| Press 'e' followed by Enter to enable device protocol trace.               |\n"
+    "| Press 'd' followed by Enter to disable device protocol trace.              |\n"
+    "| Press 'c' followed by Enter to clear the protocol trace.                   |\n"
+    "| Press 't' followed by Enter to show the protocol trace.                    |\n"
+    "|                                                                            |\n"
+    "| Press 'i' followed by Enter for help.                                      |\n"
+    "| Press 'q' followed by Enter to go to the previous screen.                  |\n"
+    "|                                                                            |\n"
+    "| Note: After the limit is reached, protocol tracing halts.                  |\n"
+    "| The default is 100, and it is a configurable value in the JSON config.     |\n"
+    "+----------------------------------------------------------------------------+\n";
+
+static const std::string DEVICE_PROPERTIES_SCREEN =
+    "+----------------------------------------------------------------------------+\n"
+    "|                 Device Properties Screen:                                  |\n"
+    "|                                                                            |\n"
+    "| Press 'p' followed by Enter to show the current device properties          |\n"
+    "|                                                                            |\n"
+    "| Press 'i' followed by Enter for help.                                      |\n"
+    "| Press 'q' followed by Enter to go to the previous screen.                  |\n"
+    "+----------------------------------------------------------------------------+\n";
+
 static const std::string RESET_WARNING =
     "Device was reset! Please don't forget to deregister it. For more details "
     "visit https://www.amazon.com/gp/help/customer/display.html?nodeId=201357520";
@@ -531,27 +602,6 @@ static const std::string DTMF_MESSAGE =
     "|                                                                            |\n"
     "+----------------------------------------------------------------------------+\n";
 
-bool UIManager::initDbus()
-    {
-        DBusError dbus_err;
-        // initialise the errors
-        dbus_error_init(&dbus_err);
-        // connect to the bus and check for errors
-        m_dbus_conn = dbus_bus_get(DBUS_BUS_SYSTEM, &dbus_err);
-        if (dbus_error_is_set(&dbus_err)) {
-            ACSDK_ERROR(LX("initFailed")
-                        .d("reason", "getDBusConnectionFailed")
-                        .d("detail reason", dbus_err.message));
-            dbus_error_free(&dbus_err);
-        }
-        if (!m_dbus_conn) {
-            ACSDK_ERROR(LX("initFailed").d("reason", "getDBusConnectionFailed-1"));
-            return false;
-        }
-
-        return true;
-}
-
 void UIManager::onDialogUXStateChanged(DialogUXState state) {
     m_executor.submit([this, state]() {
         if (state == m_dialogState) {
@@ -559,17 +609,6 @@ void UIManager::onDialogUXStateChanged(DialogUXState state) {
         }
         m_dialogState = state;
         printState();
-
-        if (m_dialogState == DialogUXState::IDLE) {
-            sendDbusSignal("on_idle");
-        } else if (m_dialogState == DialogUXState::LISTENING) {
-            sendDbusSignal("on_listen");
-        } else if (m_dialogState == DialogUXState::THINKING) {
-            sendDbusSignal("on_think");
-        } else if (m_dialogState == DialogUXState::SPEAKING) {
-            sendDbusSignal("on_speak");
-        }
-
     });
 }
 
@@ -580,14 +619,6 @@ void UIManager::onConnectionStatusChanged(const Status status, const ChangedReas
         }
         m_connectionStatus = status;
         printState();
-
-        if (m_connectionStatus == avsCommon::sdkInterfaces::ConnectionStatusObserverInterface::Status::DISCONNECTED ||
-            m_connectionStatus == avsCommon::sdkInterfaces::ConnectionStatusObserverInterface::Status::PENDING) {
-            sendDbusSignal("connecting");
-        } else if (m_connectionStatus == avsCommon::sdkInterfaces::ConnectionStatusObserverInterface::Status::CONNECTED) {
-            sendDbusSignal("ready");
-        }
-
     });
 }
 
@@ -600,7 +631,7 @@ void UIManager::onSettingChanged(const std::string& key, const std::string& valu
 
 void UIManager::onSpeakerSettingsChanged(
     const SpeakerManagerObserverInterface::Source& source,
-    const SpeakerInterface::Type& type,
+    const ChannelVolumeInterface::Type& type,
     const SpeakerInterface::SpeakerSettings& settings) {
     m_executor.submit([source, type, settings]() {
         std::ostringstream oss;
@@ -714,6 +745,10 @@ void UIManager::printHelpScreen() {
 void UIManager::printLimitedHelp() {
     m_executor.submit(
         [this]() { ConsolePrinter::simplePrint(LIMITED_HELP_HEADER + m_failureStatus + LIMITED_HELP_MESSAGE); });
+}
+
+void UIManager::printAudioInjectionHeader() {
+    m_executor.submit([]() { ConsolePrinter::simplePrint(AUDIO_INJECTION_HEADER); });
 }
 
 void UIManager::printSettingsScreen() {
@@ -926,6 +961,45 @@ void UIManager::printNetworkInfoStaticIpPrompt() {
     m_executor.submit([]() { ConsolePrinter::prettyPrint(NETWORK_INFO_STATIC_IP_PROMPT); });
 }
 
+void UIManager::printDiagnosticsScreen() {
+    m_executor.submit([]() { ConsolePrinter::simplePrint(DIAGNOSTICS_SCREEN); });
+}
+
+void UIManager::printDevicePropertiesScreen() {
+    m_executor.submit([]() { ConsolePrinter::simplePrint(DEVICE_PROPERTIES_SCREEN); });
+}
+
+void UIManager::printAllDeviceProperties(const std::unordered_map<std::string, std::string>& deviceProperties) {
+    std::stringstream ss;
+    for (const auto& keyVal : deviceProperties) {
+        ss << keyVal.first << ":" << keyVal.second << std::endl;
+    }
+    auto propertiesString = ss.str();
+    m_executor.submit([propertiesString]() { ConsolePrinter::simplePrint(propertiesString); });
+}
+
+void UIManager::printDeviceProtocolTracerScreen() {
+    m_executor.submit([]() { ConsolePrinter::simplePrint(DEVICE_PROTOCOL_TRACE_SCREEN); });
+}
+
+void UIManager::printProtocolTrace(const std::string& protocolTrace) {
+    m_executor.submit([protocolTrace]() { ConsolePrinter::simplePrint(protocolTrace); });
+}
+
+void UIManager::printProtocolTraceFlag(bool enabled) {
+    m_executor.submit([enabled]() {
+        ConsolePrinter::simplePrint("Protocol trace : " + std::string(enabled ? "Enabled" : "Disabled"));
+    });
+}
+
+void UIManager::printAudioInjectionScreen() {
+    m_executor.submit([]() { ConsolePrinter::simplePrint(AUDIO_INJECTION_SCREEN); });
+}
+
+void UIManager::printAudioInjectionFailureMessage() {
+    m_executor.submit([]() { ConsolePrinter::simplePrint("Failure injecting audio file."); });
+}
+
 void UIManager::microphoneOn() {
     m_executor.submit([this]() { printState(); });
 }
@@ -989,36 +1063,6 @@ void UIManager::printState() {
                 return;
         }
     }
-}
-
-
-void UIManager::sendDbusSignal(const std::string signalName)
-{
-    DBusMessage *msg;
-    //DBusMessageIter args;
-    dbus_uint32_t serial = 0;
-
-    ACSDK_LOG(alexaClientSDK::avsCommon::utils::logger::Level::INFO, LX("DBusSignal").d("signalName", signalName));
-
-    // create a signal & check for errors
-    msg = dbus_message_new_signal("/io/respeaker/respeakerd", // object name of the signal
-                                  "respeakerd.signal", // interface name of the signal
-                                  signalName.c_str()); // name of the signal
-    if (!msg) {
-        ACSDK_ERROR(LX("DBusFailed").d("reason", "create message failed"));
-        return;
-    }
-
-    // send the message and flush the connection
-    if (!dbus_connection_send(m_dbus_conn, msg, &serial)) {
-        ACSDK_ERROR(LX("DBusFailed").d("reason", "send message failed"));
-        return;
-    }
-
-    dbus_connection_flush(m_dbus_conn);
-
-    // free the message
-    dbus_message_unref(msg);
 }
 
 void UIManager::printCommsNotSupported() {
